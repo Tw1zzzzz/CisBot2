@@ -1,0 +1,33 @@
+[Unit]
+Description=CS2 Teammeet Bot
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cisbot
+Group=cisbot
+WorkingDirectory=/opt/cisbot2
+Environment=PATH=/opt/cisbot2/venv/bin
+ExecStart=/opt/cisbot2/venv/bin/python run_bot.py
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=always
+RestartSec=10
+TimeoutStartSec=30
+TimeoutStopSec=10
+
+# Безопасность
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/cisbot2/data /opt/cisbot2/logs
+ProtectHome=true
+
+# Логирование
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cisbot
+
+[Install]
+WantedBy=multi-user.target
