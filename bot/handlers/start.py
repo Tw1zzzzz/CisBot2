@@ -176,6 +176,10 @@ class StartHandler:
         """Обрабатывает callback запросы для навигации"""
         query = update.callback_query
         data = query.data
+        user_id = query.from_user.id
+        
+        # DEBUG: логируем все входящие callbacks для диагностики
+        logger.info(f"StartHandler received callback: {data} from user {user_id}")
 
         if data == "back_to_main":
             await self.show_main_menu(query)
@@ -191,6 +195,9 @@ class StartHandler:
             await self.show_notifications_menu(query)
         elif data.startswith("filter_elo_"):
             await self.handle_elo_filter_update(query, data)
+        elif data == "filters_reset":  # ИСПРАВЛЕНИЕ: отдельная проверка для filters_reset
+            logger.info(f"Processing filters_reset for user {user_id}")
+            await self.reset_search_filters(query)
         elif data.startswith("filter_"):
             await self.handle_filter_option(query, data)
         elif data.startswith("set_") or data.startswith("toggle_") or data.startswith("clear_"):
@@ -636,20 +643,35 @@ class StartHandler:
         """Сбрасывает все фильтры поиска"""
         user_id = query.from_user.id
         
-        # Сбрасываем фильтры
-        default_filters = {
-            'elo_filter': 'any',
-            'preferred_roles': [],
-            'maps_compatibility': 'any',
-            'time_compatibility': 'any',
-            'min_compatibility': 30,
-            'max_candidates': 20
-        }
+        logger.info(f"🔄 Resetting filters for user {user_id}")
         
-        await self.db.update_user_settings(user_id, search_filters=default_filters)
-        
-        await query.answer("✅ Фильтры сброшены!", show_alert=True)
-        await self.show_search_filters_menu(query)
+        try:
+            # Сбрасываем фильтры
+            default_filters = {
+                'elo_filter': 'any',
+                'preferred_roles': [],
+                'maps_compatibility': 'any',
+                'time_compatibility': 'any',
+                'min_compatibility': 30,
+                'max_candidates': 20
+            }
+            
+            logger.info(f"🔄 Default filters: {default_filters}")
+            
+            # Обновляем настройки пользователя
+            success = await self.db.update_user_settings(user_id, search_filters=default_filters)
+            
+            if success:
+                logger.info(f"✅ Filters reset successfully for user {user_id}")
+                await query.answer("✅ Фильтры сброшены!", show_alert=True)
+                await self.show_search_filters_menu(query)
+            else:
+                logger.error(f"❌ Failed to reset filters for user {user_id}")
+                await query.answer("❌ Ошибка при сбросе фильтров", show_alert=True)
+                
+        except Exception as e:
+            logger.error(f"❌ Exception in reset_search_filters for user {user_id}: {e}", exc_info=True)
+            await query.answer("❌ Произошла ошибка", show_alert=True)
     
     async def handle_elo_filter_update(self, query, data):
         """Обработка обновления ELO фильтров (новая система диапазонов)"""

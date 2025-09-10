@@ -88,7 +88,7 @@ class ModerationHandler:
     async def show_profile_for_moderation(self, query, profile_data):
         """Показывает профиль для модерации"""
         text = "👨‍💼 <b>Модерация анкеты</b>\n\n"
-        text += self.format_profile_for_moderation(profile_data)
+        text += await self.format_profile_for_moderation(profile_data)
         
         keyboard = [
             [
@@ -110,7 +110,7 @@ class ModerationHandler:
                 # Для других ошибок - пробрасываем дальше
                 raise e
 
-    def format_profile_for_moderation(self, profile_data) -> str:
+    async def format_profile_for_moderation(self, profile_data) -> str:
         """Форматирует профиль для модерации"""
         text = f"👤 <b>Пользователь:</b> {profile_data['first_name']}"
         if profile_data['username']:
@@ -118,7 +118,29 @@ class ModerationHandler:
         text += f"\n🆔 <b>ID:</b> {profile_data['user_id']}\n\n"
         
         text += f"🎮 <b>Игровой ник:</b> {profile_data['game_nickname']}\n"
-        text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile_data['faceit_elo'])}\n"
+        
+        # Получаем ELO статистику через Faceit API
+        elo_stats = None
+        try:
+            if profile_data['game_nickname'] and profile_data['game_nickname'].strip():
+                from bot.utils.faceit_analyzer import faceit_analyzer
+                import asyncio
+                elo_stats = await faceit_analyzer.get_elo_stats_by_nickname(profile_data['game_nickname'])
+        except Exception as e:
+            logger.debug(f"Не удалось получить ELO статистику для {profile_data['game_nickname']}: {e}")
+        
+        # Отображаем ELO с мин/макс значениями если API работает без ошибок (УЛУЧШЕННАЯ ПРОВЕРКА МОДЕРАЦИЯ)
+        if elo_stats and not elo_stats.get('api_error', False):
+            from bot.utils.cs2_data import format_faceit_elo_display
+            # Показываем мин/макс даже если значения равны 0 - это тоже валидная статистика
+            lowest_elo = elo_stats.get('lowest_elo', 0)
+            highest_elo = elo_stats.get('highest_elo', 0)
+            logger.info(f"🔥 MODERATION: Показываем ELO с мин/макс для {profile_data['game_nickname']}: мин={lowest_elo} макс={highest_elo}")
+            text += f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile_data['faceit_elo'], lowest_elo, highest_elo)}\n"
+        else:
+            if elo_stats:
+                logger.warning(f"⚠️ MODERATION: ELO статистика с ошибкой API или пуста: {elo_stats}")
+            text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile_data['faceit_elo'])}\n"
         
         # Faceit профиль
         nickname = extract_faceit_nickname(profile_data['faceit_url'])
@@ -625,7 +647,7 @@ class ModerationHandler:
                     context.user_data['moderating_profile'] = profile_data
                     
                     text = "👨‍💼 <b>Модерация анкеты</b>\n\n"
-                    text += self.format_profile_for_moderation(profile_data)
+                    text += await self.format_profile_for_moderation(profile_data)
                     
                     keyboard = [
                         [

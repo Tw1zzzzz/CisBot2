@@ -151,7 +151,26 @@ class TeammatesHandler:
                 # Используем игровой ник вместо telegram данных
                 name = partner_profile.game_nickname
                 telegram_contact = f"@{partner.username}" if partner.username else partner.first_name
-                elo_display = format_elo_display(partner_profile.faceit_elo)
+                
+                # Получаем ELO статистику через Faceit API
+                elo_stats = None
+                try:
+                    if partner_profile.game_nickname and partner_profile.game_nickname.strip():
+                        from bot.utils.faceit_analyzer import faceit_analyzer
+                        elo_stats = await faceit_analyzer.get_elo_stats_by_nickname(partner_profile.game_nickname)
+                except Exception as e:
+                    logger.debug(f"Не удалось получить ELO статистику для {partner_profile.game_nickname}: {e}")
+                
+                # Отображаем ELO с мин/макс значениями если доступно (МЯГКАЯ ПРОВЕРКА TEAMMATES)
+                if elo_stats and (elo_stats.get('lowest_elo', 0) > 0 or elo_stats.get('highest_elo', 0) > 0):
+                    from bot.utils.cs2_data import format_faceit_elo_display
+                    logger.info(f"🔥 TEAMMATES: Показываем ELO с мин/макс для {partner_profile.game_nickname}: мин={elo_stats.get('lowest_elo', 0)} макс={elo_stats.get('highest_elo', 0)}")
+                    elo_display = format_faceit_elo_display(partner_profile.faceit_elo, elo_stats.get('lowest_elo'), elo_stats.get('highest_elo'))
+                else:
+                    if elo_stats:
+                        logger.warning(f"⚠️ TEAMMATES: ELO статистика получена, но мин/макс не валидны: {elo_stats}")
+                    elo_display = format_elo_display(partner_profile.faceit_elo)
+                
                 role = format_role_display(partner_profile.role)
                 nickname = extract_faceit_nickname(partner_profile.faceit_url)
                 

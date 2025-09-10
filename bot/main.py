@@ -3,13 +3,18 @@ CS2 Teammeet Bot - Основная точка входа
 """
 import logging
 import os
+import asyncio
+import random
 from warnings import filterwarnings
 from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telegram.warnings import PTBUserWarning
+from telegram.error import NetworkError, TimedOut
+import httpx
 
 from .config import Config, setup_logging
 from .utils.keyboards import Keyboards
+from .utils.health_monitor import HealthMonitor
 from .database.operations import DatabaseManager
 from .handlers.start import StartHandler
 from .handlers.profile import ProfileHandler, ENTERING_NICKNAME, SELECTING_ELO, ENTERING_FACEIT_URL, SELECTING_ROLE, SELECTING_MAPS, SELECTING_PLAYTIME, SELECTING_CATEGORIES, ENTERING_DESCRIPTION, SELECTING_MEDIA, EDITING_MEDIA_TYPE
@@ -22,6 +27,7 @@ from .handlers.moderation import ModerationHandler
 filterwarnings(action="ignore", message=r".*CallbackQueryHandler", category=PTBUserWarning)
 
 logger = setup_logging()
+network_logger = logging.getLogger('bot.network')
 
 class CS2TeammeetBot:
     def __init__(self):
@@ -31,12 +37,19 @@ class CS2TeammeetBot:
         logger.info("Инициализация DatabaseManager...")
         self.db = DatabaseManager(Config.DATABASE_PATH)
         
+        logger.info("Инициализация Health Monitor...")
+        self.health_monitor = HealthMonitor(Config.BOT_TOKEN)
+        
         logger.info("Создание Telegram Application...")
         self.application = (
             Application.builder()
             .token(Config.BOT_TOKEN)
             .post_init(self._post_init)
             .post_shutdown(self._post_shutdown)
+            .read_timeout(30)  # Таймаут чтения (по умолчанию 5)
+            .write_timeout(30)  # Таймаут записи (по умолчанию 5) 
+            .connect_timeout(30)  # Таймаут подключения (по умолчанию 5)
+            .pool_timeout(30)  # Таймаут пула соединений (по умолчанию 5)
             .build()
         )
         self.setup_handlers()
@@ -86,7 +99,7 @@ class CS2TeammeetBot:
                 SELECTING_ELO: [
                     CallbackQueryHandler(
                         profile_handler_instance.handle_elo_selection,
-                        pattern="^(elo_custom|back)$"
+                        pattern="^(elo_custom|back|elo_back)$"
                     ),
                     MessageHandler(
                         filters.TEXT & ~filters.COMMAND,
@@ -94,10 +107,6 @@ class CS2TeammeetBot:
                     )
                 ],
                 ENTERING_FACEIT_URL: [
-                    CallbackQueryHandler(
-                        profile_handler_instance.handle_faceit_url,
-                        pattern="^elo_back$"
-                    ),
                     MessageHandler(
                         filters.TEXT & ~filters.COMMAND,
                         profile_handler_instance.handle_faceit_url
@@ -207,10 +216,10 @@ class CS2TeammeetBot:
         self.application.add_handler(media_edit_handler)
         
         # === MESSAGE HANDLERS ===
-        # Обработчик текстового ввода ELO при редактировании профиля (должен быть перед модерацией)
+        # Обработчик текстового ввода при редактировании профиля (должен быть перед модерацией)
         self.application.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            profile_handler_instance.handle_elo_text_edit
+            profile_handler_instance.handle_profile_edit_text
         ))
         
         # Обработчик текстовых сообщений для модерации (кастомные причины отклонения)
@@ -230,17 +239,17 @@ class CS2TeammeetBot:
         # Обработчики навигации по меню (должны быть после ConversationHandler)
         self.application.add_handler(CallbackQueryHandler(
             start_handler_instance.handle_callback_query,
-            pattern="^(back_to_main|help|settings_menu|settings_|filter_|set_|toggle_|clear_|notify_|privacy_|visibility_|likes_|unblock_|confirm_privacy_|cancel_privacy_).*$"
+            pattern="^(back_to_main|help|settings_menu|settings_|filter_|filters_reset|set_|toggle_|clear_|notify_|privacy_|visibility_|likes_|unblock_|confirm_privacy_|cancel_privacy_).*$"
         ))
         
         self.application.add_handler(CallbackQueryHandler(
             profile_handler_instance.handle_callback_query,
-            pattern="^(profile_menu|profile_view|profile_edit|profile_stats|edit_(?!media_add|media_replace)|confirm_edit_|cancel_edit_|elo_|role_|map_|time_|edit_media_remove|edit_categor).*$"
+            pattern="^(profile_menu|profile_view|profile_edit|profile_stats|edit_|confirm_edit_|cancel_edit_|elo_|role_|map_|time_|edit_categor).*$"
         ))
         
         self.application.add_handler(CallbackQueryHandler(
             search_handler_instance.handle_callback_query,
-            pattern="^(search_start|search_by_|search_random|like|skip)$"
+            pattern="^(search_start|search_by_|search_random|search_elo_filter|search_categories_filter|apply_elo_filter|apply_categories_filter|categories_filter_|elo_filter_|like|skip).*$"
         ))
         
         self.application.add_handler(CallbackQueryHandler(
@@ -252,14 +261,44 @@ class CS2TeammeetBot:
             moderation_handler_instance.handle_callback_query,
             pattern="^(moderation_menu|mod_queue|mod_approved|mod_rejected|mod_stats|approve_|reject_|reject_reason_|next_profile).*$"
         ))
+        
+        # Fallback handler для необработанных callbacks
+        self.application.add_handler(CallbackQueryHandler(self._handle_unmatched_callback))
 
         # Обработчик ошибок
         self.application.add_error_handler(self._error_handler)
+    
+    async def _handle_unmatched_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Fallback handler для необработанных callback запросов"""
+        query = update.callback_query
+        if query:
+            logger.warning(f"🚨 НЕОБРАБОТАННЫЙ CALLBACK: '{query.data}' от пользователя {query.from_user.id}")
+            await query.answer("❌ Команда не найдена", show_alert=True)
 
     async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        logger.error(f"Ошибка при обработке обновления {update}: {context.error}", exc_info=True)
+        """
+        Улучшенный обработчик ошибок с умной обработкой сетевых проблем
+        """
+        error = context.error
         
-        # Попытаемся отправить пользователю сообщение об ошибке
+        # Проверяем тип ошибки
+        is_network_error = isinstance(error, (NetworkError, TimedOut, httpx.ConnectError, httpx.TimeoutException))
+        is_dns_error = isinstance(error, httpx.ConnectError) and "getaddrinfo failed" in str(error)
+        
+        if is_dns_error or is_network_error:
+            # Логируем сетевые ошибки в специальный network logger
+            if update is None:
+                network_logger.warning(f"Сетевая ошибка при получении обновлений: {error}")
+            else:
+                network_logger.warning(f"Сетевая ошибка при обработке обновления {update}: {error}")
+            
+            # Не пытаемся отправлять сообщения пользователю при сетевых ошибках
+            return
+        
+        # Логируем остальные ошибки как ERROR
+        logger.error(f"Ошибка при обработке обновления {update}: {error}", exc_info=True)
+        
+        # Попытаемся отправить пользователю сообщение об ошибке (только для не-сетевых ошибок)
         try:
             if update and hasattr(update, 'effective_message') and update.effective_message:
                 await update.effective_message.reply_text(
@@ -272,20 +311,77 @@ class CS2TeammeetBot:
         except Exception as e:
             logger.error(f"Не удалось отправить сообщение об ошибке: {e}")
 
-    def run(self):
-        logger.info("Запуск CS2 Teammeet Bot с пулом соединений...")
+    async def _reconnect_db(self):
+        """Переподключение к базе данных"""
         try:
-            # Запускаем бота в режиме polling
-            # post_init и post_shutdown хуки настроены в __init__
-            self.application.run_polling(
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True
-            )
-        except KeyboardInterrupt:
-            logger.info("Получен сигнал остановки. Завершение работы...")
-        except Exception as e:
-            logger.critical(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
-            raise
+            await self.db.disconnect()
+        except Exception:
+            pass  # игнорируем ошибки при отключении
+        
+        await self.db.connect()
+        await self.db.init_database()
+
+    def run(self):
+        """
+        Запуск бота с автоматическим переподключением при сетевых ошибках
+        """
+        logger.info("Запуск CS2 Teammeet Bot с пулом соединений...")
+        
+        max_retries = 5
+        retry_delay = 5  # начальная задержка в секундах
+        
+        for retry_count in range(max_retries + 1):
+            try:
+                # Запускаем бота в режиме polling
+                self.application.run_polling(
+                    allowed_updates=Update.ALL_TYPES,
+                    drop_pending_updates=True,
+                    # Параметры для повышения надежности
+                    poll_interval=1.0,  # Интервал между запросами к API (сек)
+                    bootstrap_retries=3,  # Количество попыток подключения при старте
+                    timeout=30  # Таймаут long polling (сек)
+                )
+                
+                # Если дошли сюда, значит бот завершился нормально
+                break
+                
+            except KeyboardInterrupt:
+                logger.info("Получен сигнал остановки. Завершение работы...")
+                break
+                
+            except (NetworkError, TimedOut, httpx.ConnectError, httpx.TimeoutException) as e:
+                if retry_count < max_retries:
+                    network_logger.warning(
+                        f"Сетевая ошибка при запуске бота (попытка {retry_count + 1}/{max_retries + 1}): {e}. "
+                        f"Повтор через {retry_delay} секунд..."
+                    )
+                    
+                    # Проверяем состояние соединения
+                    health_status = asyncio.run(self.health_monitor.check_connection())
+                    if health_status:
+                        logger.info("Health check пройден, проблема может быть временной")
+                    
+                    # Exponential backoff с jitter
+                    jitter = random.uniform(0.5, 1.5)  # добавляем случайность
+                    actual_delay = retry_delay * jitter
+                    
+                    asyncio.run(asyncio.sleep(actual_delay))
+                    retry_delay *= 2  # удваиваем задержку для следующей попытки
+                    
+                    # Попытаемся переинициализировать соединение с БД
+                    try:
+                        asyncio.run(self._reconnect_db())
+                        logger.info("Соединение с БД переустановлено")
+                    except Exception as db_error:
+                        logger.warning(f"Не удалось переустановить соединение с БД: {db_error}")
+                    
+                else:
+                    logger.critical(f"Исчерпаны попытки переподключения. Последняя ошибка: {e}")
+                    raise
+                    
+            except Exception as e:
+                logger.critical(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
+                raise
 
 def main():
     """Главная функция запуска бота"""

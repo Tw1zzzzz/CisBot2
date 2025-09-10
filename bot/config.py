@@ -33,6 +33,11 @@ class Config:
     COMPATIBILITY_THRESHOLD = int(os.getenv('COMPATIBILITY_THRESHOLD', '30'))
     MAX_DAILY_LIKES = int(os.getenv('MAX_DAILY_LIKES', '50'))
     COOLDOWN_BETWEEN_LIKES = int(os.getenv('COOLDOWN_BETWEEN_LIKES', '1'))
+    
+    # Faceit Analyser API settings
+    FACEIT_ANALYSER_API_KEY = os.getenv('FACEIT_ANALYSER_API_KEY')
+    FACEIT_ANALYSER_BASE_URL = os.getenv('FACEIT_ANALYSER_BASE_URL', 'https://faceitanalyser.com/api/')
+    FACEIT_ANALYSER_CACHE_TTL = int(os.getenv('FACEIT_ANALYSER_CACHE_TTL', '3600'))  # 1 час кеш
 
 def setup_logging():
     """Настройка системы логирования"""
@@ -53,8 +58,17 @@ def setup_logging():
         ]
     )
     
-    # Уменьшаем уровень логирования для httpx (используется python-telegram-bot)
+    # Настройка логирования для сетевых компонентов
+    # Уменьшаем количество технических логов httpx, но оставляем важные ошибки
     logging.getLogger('httpx').setLevel(logging.WARNING)
+    logging.getLogger('telegram.ext.Updater').setLevel(logging.INFO)
+    
+    # Создаем специальный logger для сетевых проблем
+    network_logger = logging.getLogger('bot.network')
+    network_handler = logging.FileHandler('logs/network.log', encoding='utf-8')
+    network_handler.setFormatter(logging.Formatter(log_format))
+    network_logger.addHandler(network_handler)
+    network_logger.setLevel(logging.WARNING)
     
     logger = logging.getLogger(__name__)
     logger.info("Логирование настроено успешно")

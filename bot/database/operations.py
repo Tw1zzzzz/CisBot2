@@ -816,25 +816,52 @@ class DatabaseManager:
     async def _check_privacy_visibility(self, privacy_settings_json: str, searcher_id: int, candidate_id: int) -> bool:
         """Проверяет видимость профиля согласно настройкам приватности"""
         try:
-            if not privacy_settings_json:
+            logger.info(f"🔒 Проверяем приватность кандидата {candidate_id}")
+            
+            # 🔥 ИСПРАВЛЕНИЕ: Безопасная проверка входных данных
+            if not privacy_settings_json or privacy_settings_json.strip() == '':
+                logger.info(f"🔒 У кандидата {candidate_id} нет настроек приватности - показываем всем")
                 return True  # Настройки по умолчанию - видимый всем
             
+            # 🔥 ИСПРАВЛЕНИЕ: Безопасный парсинг JSON с валидацией
             import json
-            privacy_settings = json.loads(privacy_settings_json)
+            try:
+                privacy_settings = json.loads(privacy_settings_json)
+                if not isinstance(privacy_settings, dict):
+                    logger.warning(f"Настройки приватности не являются dict для кандидата {candidate_id}")
+                    return True  # По умолчанию показываем при некорректных данных
+            except (json.JSONDecodeError, TypeError) as json_error:
+                logger.warning(f"Ошибка парсинга JSON настроек приватности для кандидата {candidate_id}: {json_error}")
+                return True  # По умолчанию показываем при ошибке парсинга
+            
+            # 🔥 ИСПРАВЛЕНИЕ: Безопасное получение настройки видимости с валидацией
             visibility = privacy_settings.get('profile_visibility', 'all')
+            if not isinstance(visibility, str) or visibility not in ['all', 'hidden', 'matches_only']:
+                logger.warning(f"Некорректная настройка видимости '{visibility}' для кандидата {candidate_id}, используем 'all'")
+                visibility = 'all'  # Fallback к безопасному значению
+            
+            logger.info(f"🔒 Настройка видимости кандидата {candidate_id}: '{visibility}'")
             
             if visibility == 'all':
+                logger.info(f"🔒 Кандидат {candidate_id} ВИДИМ ВСЕМ")
                 return True
             elif visibility == 'hidden':
+                logger.info(f"🔒 Кандидат {candidate_id} СКРЫТ ОТ ВСЕХ")
                 return False
             elif visibility == 'matches_only':
-                # Проверяем есть ли взаимный лайк
-                return await self._check_mutual_like_async(searcher_id, candidate_id)
+                # 🔥 ИСПРАВЛЕНИЕ: Безопасная проверка взаимного лайка
+                try:
+                    mutual_like = await self._check_mutual_like_async(searcher_id, candidate_id)
+                    logger.info(f"🔒 Кандидат {candidate_id} видим только матчам, взаимный лайк: {mutual_like}")
+                    return mutual_like
+                except Exception as mutual_like_error:
+                    logger.warning(f"Ошибка проверки взаимного лайка для приватности {searcher_id} -> {candidate_id}: {mutual_like_error}")
+                    return False  # При ошибке скрываем профиль для безопасности
             
             return True
         except Exception as e:
-            logger.error(f"Ошибка проверки приватности: {e}")
-            return True  # По умолчанию показываем
+            logger.error(f"Критическая ошибка проверки приватности для кандидата {candidate_id}: {e}", exc_info=True)
+            return True  # По умолчанию показываем при критических ошибках
 
     async def _check_mutual_like_async(self, user1_id: int, user2_id: int) -> bool:
         """
@@ -861,40 +888,116 @@ class DatabaseManager:
     def _apply_search_filters(self, candidate: Profile, user_profile: Profile, filters: dict) -> bool:
         """Применяет фильтры поиска к кандидату"""
         try:
-            # Фильтр по ELO
-            if not self._filter_by_elo(candidate, user_profile, filters.get('elo_filter', 'any')):
-                return False
+            # 🔥 ИСПРАВЛЕНИЕ: Валидация входных данных
+            if not candidate or not user_profile:
+                logger.warning(f"Некорректные профили для фильтрации: candidate={candidate is not None}, user_profile={user_profile is not None}")
+                return False  # Скрываем при некорректных данных
             
-            # Фильтр по ролям
-            preferred_roles = filters.get('preferred_roles', [])
-            if preferred_roles and candidate.role not in preferred_roles:
-                return False
+            if not isinstance(filters, dict):
+                logger.warning(f"Фильтры не являются словарем: {type(filters)}")
+                filters = {}  # Fallback к пустому словарю
             
-            # Фильтр по совместимости карт
-            if not self._filter_by_maps_compatibility(candidate, user_profile, filters.get('maps_compatibility', 'any')):
-                return False
+            # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Добавляем детальное логирование фильтрации
+            logger.info(f"🔍 Начинаем фильтрацию кандидата {candidate.user_id}")
             
-            # Фильтр по совместимости времени
-            if not self._filter_by_time_compatibility(candidate, user_profile, filters.get('time_compatibility', 'any')):
-                return False
-            
-            # Фильтр по категориям
-            categories_filter = filters.get('categories_filter', [])
-            if categories_filter and not self._filter_by_categories(candidate, categories_filter):
-                return False
-            
-            # Фильтр по минимальной совместимости
-            min_compat = filters.get('min_compatibility', 30)
-            if min_compat > 0:
-                from bot.utils.cs2_data import calculate_profile_compatibility
-                compatibility = calculate_profile_compatibility(user_profile, candidate)
-                if compatibility['total'] < min_compat:
+            # 🔥 ИСПРАВЛЕНИЕ: Безопасный фильтр по ELO
+            try:
+                elo_filter = filters.get('elo_filter', 'any')
+                if not self._filter_by_elo(candidate, user_profile, elo_filter):
+                    logger.info(f"🔥 Кандидат {candidate.user_id} отфильтрован по ELO: {elo_filter}")
                     return False
+                else:
+                    logger.info(f"🔥 Кандидат {candidate.user_id} ПРОШЕЛ ELO фильтр: {elo_filter}")
+            except Exception as elo_error:
+                logger.warning(f"Ошибка ELO фильтра для кандидата {candidate.user_id}: {elo_error}")
+                # При ошибке ELO фильтра продолжаем проверку других критериев
             
+            # 🔥 ИСПРАВЛЕНИЕ: Безопасный фильтр по ролям
+            try:
+                preferred_roles = filters.get('preferred_roles', [])
+                if isinstance(preferred_roles, list) and len(preferred_roles) > 0:
+                    candidate_role = getattr(candidate, 'role', None)
+                    if candidate_role not in preferred_roles:
+                        logger.info(f"🔥 Кандидат {candidate.user_id} отфильтрован по роли: {candidate_role} не в {preferred_roles}")
+                        return False
+                    else:
+                        logger.info(f"🔥 Кандидат {candidate.user_id} ПРОШЕЛ фильтр ролей")
+                else:
+                    logger.info(f"🔥 Фильтр ролей отключен для кандидата {candidate.user_id}")
+            except Exception as role_error:
+                logger.warning(f"Ошибка фильтра ролей для кандидата {candidate.user_id}: {role_error}")
+                # При ошибке фильтра ролей продолжаем проверку
+            
+            # 🔥 ИСПРАВЛЕНИЕ: Безопасный фильтр по совместимости карт
+            try:
+                maps_compatibility = filters.get('maps_compatibility', 'any')
+                if not self._filter_by_maps_compatibility(candidate, user_profile, maps_compatibility):
+                    logger.info(f"🔥 Кандидат {candidate.user_id} отфильтрован по совместимости карт: {maps_compatibility}")
+                    return False
+                else:
+                    logger.info(f"🔥 Кандидат {candidate.user_id} ПРОШЕЛ фильтр карт: {maps_compatibility}")
+            except Exception as maps_error:
+                logger.warning(f"Ошибка фильтра карт для кандидата {candidate.user_id}: {maps_error}")
+                # При ошибке фильтра карт продолжаем проверку
+            
+            # 🔥 ИСПРАВЛЕНИЕ: Безопасный фильтр по совместимости времени
+            try:
+                time_compatibility = filters.get('time_compatibility', 'any')
+                if not self._filter_by_time_compatibility(candidate, user_profile, time_compatibility):
+                    logger.info(f"🔥 Кандидат {candidate.user_id} отфильтрован по совместимости времени: {time_compatibility}")
+                    return False
+                else:
+                    logger.info(f"🔥 Кандидат {candidate.user_id} ПРОШЕЛ фильтр времени: {time_compatibility}")
+            except Exception as time_error:
+                logger.warning(f"Ошибка фильтра времени для кандидата {candidate.user_id}: {time_error}")
+                # При ошибке фильтра времени продолжаем проверку
+            
+            # 🔥 ИСПРАВЛЕНИЕ: Безопасный фильтр по категориям
+            try:
+                categories_filter = filters.get('categories_filter', [])
+                if isinstance(categories_filter, list) and len(categories_filter) > 0:
+                    if not self._filter_by_categories(candidate, categories_filter):
+                        logger.info(f"🔥 Кандидат {candidate.user_id} отфильтрован по категориям: {categories_filter}")
+                        return False
+                    else:
+                        logger.info(f"🔥 Кандидат {candidate.user_id} ПРОШЕЛ фильтр категорий")
+                else:
+                    logger.info(f"🔥 Фильтр категорий отключен для кандидата {candidate.user_id}")
+            except Exception as categories_error:
+                logger.warning(f"Ошибка фильтра категорий для кандидата {candidate.user_id}: {categories_error}")
+                # При ошибке фильтра категорий продолжаем проверку
+            
+            # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Безопасный фильтр по минимальной совместимости
+            try:
+                min_compat = filters.get('min_compatibility', 30)
+                if isinstance(min_compat, (int, float)) and min_compat > 0:
+                    from bot.utils.cs2_data import calculate_profile_compatibility
+                    compatibility = calculate_profile_compatibility(user_profile, candidate)
+                    if compatibility and 'total' in compatibility:
+                        total_compat = compatibility['total']
+                        logger.info(f"🔥 Совместимость кандидата {candidate.user_id}: {total_compat}%, минимум: {min_compat}%")
+                        if total_compat < min_compat:
+                            logger.info(f"🔥 Кандидат {candidate.user_id} ОТФИЛЬТРОВАН по совместимости: {total_compat}% < {min_compat}%")
+                            return False
+                        else:
+                            logger.info(f"🔥 Кандидат {candidate.user_id} ПРОШЕЛ фильтр совместимости: {total_compat}% >= {min_compat}%")
+                    else:
+                        logger.warning(f"Некорректный результат расчета совместимости для кандидата {candidate.user_id}")
+                        # При ошибке расчета совместимости не фильтруем
+                        logger.info(f"🔥 Кандидат {candidate.user_id} пропущен через фильтр совместимости из-за ошибки расчета")
+                else:
+                    logger.info(f"🔥 Фильтр совместимости отключен для кандидата {candidate.user_id}")
+            except Exception as compatibility_error:
+                logger.warning(f"Ошибка фильтра совместимости для кандидата {candidate.user_id}: {compatibility_error}")
+                # При ошибке фильтра совместимости продолжаем без фильтрации
+                logger.info(f"🔥 Кандидат {candidate.user_id} пропущен через фильтр совместимости из-за ошибки")
+            
+            logger.info(f"🔥 Кандидат {candidate.user_id} ПРОШЕЛ ВСЕ ФИЛЬТРЫ!")
             return True
+            
         except Exception as e:
-            logger.error(f"Ошибка применения фильтров: {e}")
-            return True  # По умолчанию не фильтруем
+            logger.error(f"Критическая ошибка применения фильтров для кандидата {getattr(candidate, 'user_id', 'неизвестен')}: {e}", exc_info=True)
+            return True  # По умолчанию не фильтруем при критических ошибках
 
     def _filter_by_elo(self, candidate: Profile, user_profile: Profile, elo_filter: str) -> bool:
         """Фильтрует по ELO"""
@@ -960,19 +1063,64 @@ class DatabaseManager:
 
     def _filter_by_categories(self, candidate: Profile, categories_filter: list) -> bool:
         """Фильтрует по категориям"""
-        if not categories_filter:
-            return True
-        
-        # Если у кандидата нет категорий, пропускаем
-        if not hasattr(candidate, 'categories') or not candidate.categories:
-            return False
-        
-        # Проверяем, есть ли пересечение категорий
-        candidate_categories = set(candidate.categories)
-        filter_categories = set(categories_filter)
-        
-        # Если есть хотя бы одна общая категория, кандидат подходит
-        return len(candidate_categories & filter_categories) > 0
+        try:
+            # 🔥 ИСПРАВЛЕНИЕ: Валидация фильтра категорий
+            if not categories_filter or not isinstance(categories_filter, list):
+                return True  # Нет фильтра - показываем всех
+            
+            # Очищаем фильтр от пустых/некорректных значений
+            valid_categories_filter = []
+            for cat in categories_filter:
+                if isinstance(cat, str) and cat.strip():
+                    valid_categories_filter.append(cat.strip())
+            
+            if not valid_categories_filter:
+                return True  # После очистки фильтр пуст - показываем всех
+            
+            # 🔥 ИСПРАВЛЕНИЕ: Безопасная проверка категорий кандидата
+            if not hasattr(candidate, 'categories'):
+                logger.debug(f"У кандидата {candidate.user_id} нет атрибута categories")
+                return False
+            
+            candidate_categories_raw = getattr(candidate, 'categories', None)
+            if not candidate_categories_raw:
+                logger.debug(f"У кандидата {candidate.user_id} пустые категории")
+                return False
+            
+            # Проверяем тип категорий кандидата
+            if not isinstance(candidate_categories_raw, list):
+                logger.warning(f"Категории кандидата {candidate.user_id} не являются списком: {type(candidate_categories_raw)}")
+                return False
+            
+            # Очищаем категории кандидата от некорректных значений
+            valid_candidate_categories = []
+            for cat in candidate_categories_raw:
+                if isinstance(cat, str) and cat.strip():
+                    valid_candidate_categories.append(cat.strip())
+            
+            if not valid_candidate_categories:
+                logger.debug(f"У кандидата {candidate.user_id} нет валидных категорий")
+                return False
+            
+            # 🔥 ИСПРАВЛЕНИЕ: Безопасная проверка пересечения категорий
+            try:
+                candidate_categories = set(valid_candidate_categories)
+                filter_categories = set(valid_categories_filter)
+                
+                # Если есть хотя бы одна общая категория, кандидат подходит
+                common_categories = candidate_categories & filter_categories
+                has_common = len(common_categories) > 0
+                
+                logger.debug(f"Кандидат {candidate.user_id} категории: {candidate_categories}, фильтр: {filter_categories}, общие: {common_categories}, подходит: {has_common}")
+                return has_common
+                
+            except Exception as set_error:
+                logger.warning(f"Ошибка создания множеств категорий для кандидата {candidate.user_id}: {set_error}")
+                return False
+            
+        except Exception as e:
+            logger.error(f"Критическая ошибка фильтрации по категориям для кандидата {getattr(candidate, 'user_id', 'неизвестен')}: {e}", exc_info=True)
+            return True  # По умолчанию не фильтруем при критических ошибках
 
     def _sort_by_compatibility(self, candidates: List[Profile], user_profile: Profile, filters: dict) -> List[Profile]:
         """Сортирует кандидатов по совместимости"""

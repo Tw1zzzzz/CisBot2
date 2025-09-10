@@ -1,9 +1,6 @@
 ---
-description: 
-globs: 
 alwaysApply: false
 ---
-
 # Testing Requirements
 
 ## Test Coverage Rules

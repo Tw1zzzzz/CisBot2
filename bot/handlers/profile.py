@@ -11,6 +11,7 @@ from bot.utils.cs2_data import (
     get_role_by_name, CS2_MAPS, PLAYTIME_OPTIONS,
     validate_faceit_url, format_elo_display, format_faceit_display
 )
+from bot.utils.faceit_analyzer import faceit_analyzer
 from bot.database.operations import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ class ProfileHandler:
                 
                 # Показываем профиль с медиа сразу
                 text = "👤 <b>Ваш профиль</b>\n\n"
-                text += self._format_profile_text(profile)
+                text += await self._format_profile_text(profile, show_faceit_stats=True)
                 
                 # Определяем клавиатуру в зависимости от статуса профиля
                 if is_rejected:
@@ -129,9 +130,10 @@ class ProfileHandler:
                     parse_mode='HTML'
             )
 
-    def _format_profile_text(self, profile) -> str:
+    async def _format_profile_text(self, profile, show_faceit_stats=False) -> str:
         """Форматирует текст профиля для отображения"""
-        from bot.utils.cs2_data import format_elo_display, format_role_display, extract_faceit_nickname, PLAYTIME_OPTIONS
+        from bot.utils.cs2_data import format_elo_display, format_role_display, extract_faceit_nickname, PLAYTIME_OPTIONS, format_faceit_elo_display
+        from bot.utils.faceit_analyzer import faceit_analyzer
         
         # Статус модерации
         moderation_status = getattr(profile, 'moderation_status', 'pending')
@@ -147,11 +149,44 @@ class ProfileHandler:
         text += "\n"
         
         text += f"🎮 <b>Игровой ник:</b> {profile.game_nickname}\n"
-        text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
+        
+        # Получаем ELO статистику через Faceit API
+        elo_stats = None
+        try:
+            if profile.game_nickname and profile.game_nickname.strip():
+                elo_stats = await faceit_analyzer.get_elo_stats_by_nickname(profile.game_nickname)
+        except Exception as e:
+            logger.warning(f"Не удалось получить ELO статистику для {profile.game_nickname}: {e}")
+        
+        # Отображаем ELO с мин/макс значениями если API работает без ошибок (УЛУЧШЕННАЯ ПРОВЕРКА)
+        if elo_stats and not elo_stats.get('api_error', False):
+            # Показываем мин/макс даже если значения равны 0 - это тоже валидная статистика
+            lowest_elo = elo_stats.get('lowest_elo', 0)
+            highest_elo = elo_stats.get('highest_elo', 0)
+            logger.info(f"🔥 Показываем ELO с мин/макс для {profile.game_nickname}: мин={lowest_elo} макс={highest_elo}")
+            text += f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile.faceit_elo, lowest_elo, highest_elo)}\n"
+        else:
+            if elo_stats:
+                logger.warning(f"⚠️ ELO статистика с ошибкой API или пуста: {elo_stats}")
+            text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
         
         # Faceit профиль
         nickname = extract_faceit_nickname(profile.faceit_url)
         text += f"🔗 <b>Faceit:</b> <a href='{profile.faceit_url}'>{nickname}</a>\n"
+        
+        # Добавляем данные Faceit Analyser если включено
+        if show_faceit_stats:
+            try:
+                faceit_url = getattr(profile, 'faceit_url', '')
+                if faceit_url:
+                    logger.debug(f"Получение Faceit Analyser данных для собственного профиля {profile.user_id}")
+                    faceit_data = await faceit_analyzer.get_enhanced_profile_info(faceit_url)
+                    
+                    # Диаграммы отключены
+                        
+            except Exception as faceit_error:
+                logger.warning(f"Ошибка получения данных Faceit Analyser для профиля {profile.user_id}: {faceit_error}")
+                # Не критично, продолжаем без данных от API
         
         text += f"👤 <b>Роль:</b> {format_role_display(profile.role)}\n"
         text += f"🗺️ <b>Любимые карты:</b> {', '.join(profile.favorite_maps[:3])}{'...' if len(profile.favorite_maps) > 3 else ''}\n"
@@ -294,6 +329,14 @@ class ProfileHandler:
         
         if query.data == "back":
             return await self.cancel_creation(update, context)
+        elif query.data == "elo_back":
+            # Возврат к меню выбора ELO из экрана ввода точного ELO
+            await query.edit_message_text(
+                "<b>Шаг 2/7:</b> Введите ваше точное ELO на Faceit:",
+                reply_markup=Keyboards.elo_input_menu(),
+                parse_mode='HTML'
+            )
+            return SELECTING_ELO
         elif query.data == "elo_custom":
             await query.edit_message_text(
                 "📝 <b>Введите ваше точное ELO на Faceit</b>\n\n"
@@ -334,19 +377,7 @@ class ProfileHandler:
 
     async def handle_faceit_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обрабатывает ввод ссылки на Faceit"""
-        if update.callback_query:
-            query = update.callback_query
-            await query.answer()
-            if query.data == "elo_back":
-                # Возвращаемся к шагу выбора ELO, сохраняя введенный ник
-                await query.edit_message_text(
-                    "<b>Шаг 2/7:</b> Введите ваше точное ELO на Faceit:",
-                    reply_markup=Keyboards.elo_input_menu(),
-                    parse_mode='HTML'
-                )
-                return SELECTING_ELO
-        
-        elif update.message:
+        if update.message:
             text = update.message.text.strip()
             
             # Проверяем на ссылку Faceit
@@ -982,7 +1013,7 @@ class ProfileHandler:
         
         # Форматируем полный профиль
         text = "👤 <b>Ваш полный профиль:</b>\n\n"
-        text += self._format_full_profile_text(profile)
+        text += await self._format_full_profile_text(profile)
         
         # Отправляем профиль с медиа
         await self.send_profile_with_media(
@@ -993,12 +1024,42 @@ class ProfileHandler:
             context=context
         )
 
-    def _format_full_profile_text(self, profile) -> str:
+    async def _format_full_profile_text(self, profile) -> str:
         """Форматирует полный текст профиля"""
-        from bot.utils.cs2_data import format_elo_display, format_role_display, extract_faceit_nickname, PLAYTIME_OPTIONS, CS2_MAPS
+        from bot.utils.cs2_data import format_elo_display, format_role_display, extract_faceit_nickname, PLAYTIME_OPTIONS, CS2_MAPS, format_faceit_elo_display
+        from bot.utils.faceit_analyzer import faceit_analyzer
         
-        text = f"🎯 <b>Ранг:</b> {format_elo_display(profile.faceit_elo)}\n"
+        # Получаем ELO статистику через Faceit API
+        elo_stats = None
+        try:
+            if profile.game_nickname and profile.game_nickname.strip():
+                elo_stats = await faceit_analyzer.get_elo_stats_by_nickname(profile.game_nickname)
+        except Exception as e:
+            logger.warning(f"Не удалось получить ELO статистику для {profile.game_nickname}: {e}")
+        
+        # Отображаем ELO с мин/макс значениями если доступно (МЯГКАЯ ПРОВЕРКА В _format_full_profile_text)
+        if elo_stats and (elo_stats.get('lowest_elo', 0) > 0 or elo_stats.get('highest_elo', 0) > 0):
+            logger.info(f"🔥 FULL PROFILE: Показываем ELO с мин/макс для {profile.game_nickname}: мин={elo_stats.get('lowest_elo', 0)} макс={elo_stats.get('highest_elo', 0)}")
+            text = f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile.faceit_elo, elo_stats.get('lowest_elo'), elo_stats.get('highest_elo'))}\n"
+        else:
+            if elo_stats:
+                logger.warning(f"⚠️ FULL PROFILE: ELO статистика получена, но мин/макс не валидны: {elo_stats}")
+            text = f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
+        
         text += f"👤 <b>Роль:</b> {format_role_display(profile.role)}\n\n"
+        
+        # Добавляем данные Faceit Analyser для полного профиля
+        try:
+            faceit_url = getattr(profile, 'faceit_url', '')
+            if faceit_url:
+                logger.debug(f"Получение Faceit Analyser данных для полного профиля {profile.user_id}")
+                faceit_data = await faceit_analyzer.get_enhanced_profile_info(faceit_url)
+                
+                # Диаграммы отключены
+                    
+        except Exception as faceit_error:
+            logger.warning(f"Ошибка получения данных Faceit Analyser для полного профиля {profile.user_id}: {faceit_error}")
+            # Не критично, продолжаем без данных от API
         
         text += f"🗺️ <b>Любимые карты:</b>\n"
         for map_name in profile.favorite_maps:
@@ -1516,7 +1577,7 @@ class ProfileHandler:
                 profile = await self.db.get_profile(user_id)
                 if profile:
                     text = "👤 <b>Ваш обновленный профиль:</b>\n\n"
-                    text += self._format_full_profile_text(profile)
+                    text += await self._format_full_profile_text(profile)
                     
                     await self.send_profile_with_media(
                         chat_id=update.effective_chat.id,
@@ -1903,46 +1964,122 @@ class ProfileHandler:
             logger.error(f"Ошибка при обновлении времени: {e}")
             await query.answer("❌ Произошла ошибка", show_alert=True)
 
-    async def handle_elo_text_edit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Обрабатывает ввод точного ELO при редактировании профиля"""
-        # Проверяем что мы ожидаем ввод ELO
-        if not context.user_data.get('awaiting_elo_input') or context.user_data.get('editing_field') != 'faceit_elo':
-            return
-        
+    async def handle_profile_edit_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Универсальный обработчик текстового ввода при редактировании профиля"""
         user_id = update.effective_user.id
         text = update.message.text.strip()
         
-        # Парсим ELO как число
-        try:
-            elo = int(text)
-            if 1 <= elo <= 6000:
+        # Обработка ввода ELO
+        if context.user_data.get('awaiting_elo_input') and context.user_data.get('editing_field') == 'faceit_elo':
+            try:
+                elo = int(text)
+                if 1 <= elo <= 6000:
+                    # Обновляем профиль в БД
+                    success = await self.db.update_profile(user_id, faceit_elo=elo)
+                    
+                    if success:
+                        from bot.utils.cs2_data import format_elo_display
+                        await update.message.reply_text(
+                            f"✅ <b>ELO обновлено!</b>\n\n"
+                            f"<b>Новое ELO:</b> {format_elo_display(elo)}",
+                            parse_mode='HTML'
+                        )
+                        
+                        # Очищаем флаги редактирования
+                        self.clear_editing_context(context)
+                        
+                        # Возвращаемся к полному профилю
+                        await self.view_full_profile(update, context)
+                    else:
+                        await update.message.reply_text(
+                            "❌ Ошибка при сохранении ELO. Попробуйте еще раз."
+                        )
+                else:
+                    await update.message.reply_text(
+                        "❌ ELO должно быть от 1 до 6000. Попробуйте еще раз:"
+                    )
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ Введите корректное число от 1 до 6000. Попробуйте еще раз:"
+                )
+            return
+        
+        # Обработка ввода описания
+        if context.user_data.get('awaiting_description') and context.user_data.get('editing_field') == 'description':
+            if len(text) > 500:
+                await update.message.reply_text(
+                    "❌ Описание слишком длинное! Максимум 500 символов.\n"
+                    f"Ваше описание: {len(text)} символов.\n\n"
+                    "Попробуйте сократить:"
+                )
+                return
+            
+            try:
                 # Обновляем профиль в БД
-                success = await self.db.update_profile(user_id, faceit_elo=elo)
+                success = await self.db.update_profile(user_id, description=text)
                 
                 if success:
-                    from bot.utils.cs2_data import format_elo_display
                     await update.message.reply_text(
-                        f"✅ <b>ELO обновлено!</b>\n\n"
-                        f"<b>Новое ELO:</b> {format_elo_display(elo)}",
+                        f"✅ <b>Описание обновлено!</b>\n\n"
+                        f"<b>Новое описание:</b>\n{text[:100]}{'...' if len(text) > 100 else ''}",
                         parse_mode='HTML'
                     )
                     
                     # Очищаем флаги редактирования
-                    context.user_data.pop('awaiting_elo_input', None)
-                    context.user_data.pop('editing_field', None)
-                    context.user_data.pop('editing_profile', None)
+                    self.clear_editing_context(context)
                     
                     # Возвращаемся к полному профилю
                     await self.view_full_profile(update, context)
                 else:
                     await update.message.reply_text(
-                        "❌ Ошибка при сохранении ELO. Попробуйте еще раз."
+                        "❌ Ошибка при сохранении описания. Попробуйте еще раз."
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при сохранении описания: {e}")
+                await update.message.reply_text(
+                    "❌ Произошла ошибка при сохранении. Попробуйте еще раз."
+                )
+            return
+        
+        # Обработка ввода Faceit URL
+        if context.user_data.get('awaiting_faceit_url') and context.user_data.get('editing_field') == 'faceit_url':
+            from bot.utils.cs2_data import validate_faceit_url, extract_faceit_nickname
+            
+            if validate_faceit_url(text):
+                try:
+                    # Обновляем профиль в БД
+                    success = await self.db.update_profile(user_id, faceit_url=text)
+                    
+                    if success:
+                        nickname = extract_faceit_nickname(text)
+                        await update.message.reply_text(
+                            f"✅ <b>Faceit профиль обновлен!</b>\n\n"
+                            f"<b>Новый профиль:</b> <a href='{text}'>{nickname}</a>",
+                            parse_mode='HTML'
+                        )
+                        
+                        # Очищаем флаги редактирования
+                        self.clear_editing_context(context)
+                        
+                        # Возвращаемся к полному профилю
+                        await self.view_full_profile(update, context)
+                    else:
+                        await update.message.reply_text(
+                            "❌ Ошибка при сохранении Faceit профиля. Попробуйте еще раз."
+                        )
+                except Exception as e:
+                    logger.error(f"Ошибка при сохранении Faceit URL: {e}")
+                    await update.message.reply_text(
+                        "❌ Произошла ошибка при сохранении. Попробуйте еще раз."
                     )
             else:
                 await update.message.reply_text(
-                    "❌ ELO должно быть от 1 до 6000. Попробуйте еще раз:"
+                    "❌ Неверная ссылка на Faceit профиль!\n"
+                    "Ссылка должна быть в формате:\n"
+                    "https://www.faceit.com/ru/players/nickname\n\n"
+                    "Попробуйте еще раз:"
                 )
-        except ValueError:
-            await update.message.reply_text(
-                "❌ Введите корректное число от 1 до 6000. Попробуйте еще раз:"
-            ) 
+            return
+        
+        # Если ни один из флагов редактирования не установлен, не обрабатываем сообщение
+        return 

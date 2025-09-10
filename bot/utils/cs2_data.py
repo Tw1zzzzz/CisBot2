@@ -102,10 +102,28 @@ def validate_faceit_url(url: str) -> bool:
     return bool(re.match(pattern, url))
 
 def extract_faceit_nickname(url: str) -> str:
-    """Извлекает никнейм из ссылки на Faceit"""
+    """Извлекает никнейм из ссылки на Faceit - улучшенная версия"""
     import re
-    match = re.search(r'/players/([a-zA-Z0-9_-]+)', url)
-    return match.group(1) if match else ""
+    
+    if not url:
+        return ""
+    
+    # Паттерны для разных форматов Faceit URL
+    patterns = [
+        r'/players/([a-zA-Z0-9_-]+)',  # Стандартный: /en/players/nickname
+        r'faceit\.com/([a-zA-Z0-9_-]+)/?$',  # Прямой: faceit.com/nickname
+        r'/([a-zA-Z0-9_-]+)/?$'  # Последний сегмент URL
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            nickname = match.group(1)
+            # Исключаем служебные слова
+            if nickname.lower() not in ['en', 'ru', 'de', 'fr', 'es', 'players', 'profile', 'www', 'api']:
+                return nickname
+    
+    return ""
 
 def get_role_by_name(role_name: str) -> dict:
     """Получает данные роли по имени"""
@@ -131,6 +149,23 @@ def format_faceit_display(elo: int, faceit_url: str) -> str:
     nickname = extract_faceit_nickname(faceit_url)
     elo_display = format_elo_display(elo)
     return f"{elo_display}\n🔗 [Faceit: {nickname}]({faceit_url})"
+
+def format_faceit_elo_display(current_elo: int, min_elo: int = None, max_elo: int = None, nickname: str = None) -> str:
+    """Форматирует отображение Faceit ELO с мин/макс значениями"""
+    base_display = format_elo_display(current_elo)
+    
+    # Показываем мин/макс значения если они переданы (включая 0 - это тоже валидная статистика)
+    elo_parts = []
+    if min_elo is not None:
+        elo_parts.append(f"мин:{min_elo}")
+    if max_elo is not None:
+        elo_parts.append(f"макс:{max_elo}")
+    
+    # Добавляем дополнительную информацию если есть
+    if elo_parts:
+        base_display += f" ({' '.join(elo_parts)})"
+    
+    return base_display
 
 def format_role_display(role_name: str) -> str:
     """Форматирует отображение роли с эмодзи"""

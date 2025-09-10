@@ -1,0 +1,264 @@
+---
+alwaysApply: true
+---
+# CisBot2 Development Rules
+
+You are an expert in Python, python-telegram-bot (PTB), SQLite, aiosqlite, and Telegram bot development with a focus on reliability and stability.
+
+## Key Principles
+
+- **Stability First**: Every change must be tested and verified before deployment
+- **Error Handling**: Always implement comprehensive error handling and logging
+- **Database Integrity**: Ensure all database operations are atomic and properly handled
+- **User Experience**: Never leave users in broken states or without feedback
+- **Modular Design**: Maintain clear separation of concerns across modules
+
+## Code Style and Structure
+
+- Write clean, readable Python code with comprehensive type hints
+- Use async/await patterns consistently for all bot operations
+- Follow PEP 8 standards with descriptive variable names
+- Structure files: handler functions, helper utilities, database operations, error handling
+- Keep functions focused and single-purpose
+- Use descriptive names that explain the function's purpose (e.g., `handle_profile_save`, `validate_user_input`)
+
+## Python/PTB Specific Guidelines
+
+### Conversation Handlers
+- Always use ConversationHandler.END to properly terminate conversations
+- Implement fallback handlers for unexpected user inputs
+- Use conversation states as constants (CAPS_SNAKE_CASE)
+- Always handle conversation timeouts and cancellations
+
+### Message Handling
+- Use `CallbackContext.drop_callback_data` to prevent memory leaks
+- Always acknowledge callback queries with `query.answer()`
+- Implement proper message editing vs. sending new messages
+- Handle API rate limits and flood control
+
+### Database Operations
+- Use connection pooling for database operations
+- Always use transactions for multi-step database operations
+- Implement proper connection cleanup and error recovery
+- Use prepared statements to prevent SQL injection
+- Add database operation logging for debugging
+
+## Error Handling and Validation
+
+### Critical Error Handling Rules
+1. **Never let exceptions crash the bot**
+   - Wrap all handler functions in try-catch blocks
+   - Log all errors with full context and stack traces
+   - Send user-friendly error messages, never expose internal errors
+
+2. **Database Error Recovery**
+   - Always rollback failed transactions
+   - Implement retry mechanisms for temporary failures
+   - Validate data before database operations
+   - Handle connection timeouts gracefully
+
+3. **User Input Validation**
+   - Validate all user inputs before processing
+   - Sanitize text inputs to prevent injection attacks
+   - Handle unexpected message types gracefully
+   - Provide clear error messages for invalid inputs
+
+### Logging Strategy
+```python
+import logging
+logger = logging.getLogger(__name__)
+
+# Always log errors with context
+logger.error(f"Failed to save user profile for {user_id}: {str(e)}", exc_info=True)
+
+# Log important user actions for debugging
+logger.info(f"User {user_id} completed profile setup with role: {role}")
+```
+
+## Database Best Practices
+
+### Transaction Management
+- Use `async with connection.execute()` for single operations
+- Use `async with connection.transaction()` for multi-step operations
+- Always handle database connection errors
+- Implement connection health checks
+
+### Schema Management
+- Document all database schema changes in planning/database_schema.md
+- Use migration scripts for schema updates
+- Maintain referential integrity with proper foreign keys
+- Add indexes for frequently queried fields
+
+### Data Validation
+- Validate data types before database insertion
+- Check for required fields and constraints
+- Handle duplicate key errors gracefully
+- Implement soft deletes where appropriate
+
+## Testing Requirements
+
+### Unit Testing
+- Write tests for all new handler functions
+- Test both success and failure scenarios
+- Mock external dependencies (database, Telegram API)
+- Use pytest with async test support
+
+### Integration Testing
+- Test complete conversation flows
+- Verify database state changes
+- Test error recovery scenarios
+- Validate user experience end-to-end
+
+### Test Structure Example
+```python
+import pytest
+from unittest.mock import Mock, patch
+
+@pytest.mark.asyncio
+async def test_profile_save_success():
+    # Arrange
+    update = Mock()
+    context = Mock()
+    
+    # Act
+    result = await handle_profile_save(update, context)
+    
+    # Assert
+    assert result == ConversationHandler.END
+    assert context.user_data["profile_saved"] is True
+```
+
+## Deployment and Monitoring
+
+### Pre-deployment Checklist
+- [ ] All tests pass
+- [ ] Database migrations applied
+- [ ] Environment variables configured
+- [ ] Logging levels set correctly
+- [ ] Error handling tested
+- [ ] User flows verified
+
+### Monitoring
+- Monitor bot health and response times
+- Track database connection pool status
+- Log and alert on critical errors
+- Monitor user engagement metrics
+
+## Module-Specific Guidelines
+
+### Handlers (`bot/handlers/`)
+- Each handler should have a single responsibility
+- Always return appropriate conversation states
+- Implement comprehensive error handling
+- Use context.user_data for temporary state storage
+
+### Database (`bot/database/`)
+- Keep models simple and focused
+- Implement proper connection pooling
+- Use type hints for all database operations
+- Add comprehensive error handling
+
+### Utils (`bot/utils/`)
+- Keep utility functions pure and testable
+- Add type hints and docstrings
+- Handle edge cases explicitly
+- Make functions reusable across modules
+
+## Security Guidelines
+
+### Input Sanitization
+- Validate all user inputs before processing
+- Escape special characters in database queries
+- Limit input lengths to prevent abuse
+- Filter malicious content patterns
+
+### Data Privacy
+- Never log sensitive user data
+- Implement proper data retention policies
+- Use secure methods for data transmission
+- Follow GDPR compliance for user data
+
+## Performance Optimization
+
+### Bot Performance
+- Use async operations for all I/O
+- Implement connection pooling for database
+- Cache frequently accessed data
+- Monitor memory usage and clean up resources
+
+### Database Performance
+- Use indexes on frequently queried columns
+- Implement query optimization
+- Monitor slow queries
+- Use connection pooling effectively
+
+## Documentation Requirements
+
+### Code Documentation
+- Add docstrings to all public functions
+- Document complex business logic
+- Maintain up-to-date README files
+- Document API changes in planning/ directory
+
+### Planning Documentation
+- Update planning files when implementing features
+- Document known issues and workarounds
+- Maintain implementation status tracking
+- Record deployment procedures
+
+## Key Conventions
+
+1. **Fail Fast**: Detect and handle errors as early as possible
+2. **User Feedback**: Always provide feedback for user actions
+3. **Graceful Degradation**: Handle partial failures without breaking the bot
+4. **Data Consistency**: Ensure database operations maintain data integrity
+5. **Logging**: Comprehensive logging for debugging and monitoring
+
+## Common Patterns
+
+### Handler Pattern
+```python
+async def handle_user_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        user_id = update.effective_user.id
+        
+        # Validate input
+        if not validate_input(update.message.text):
+            await update.message.reply_text("Invalid input. Please try again.")
+            return CURRENT_STATE
+        
+        # Process action
+        result = await process_user_action(user_id, update.message.text)
+        
+        # Update database
+        async with get_db_connection() as conn:
+            await save_user_data(conn, user_id, result)
+        
+        # Send confirmation
+        await update.message.reply_text("Action completed successfully!")
+        return ConversationHandler.END
+        
+    except Exception as e:
+        logger.error(f"Error in handle_user_action for user {user_id}: {str(e)}", exc_info=True)
+        await update.message.reply_text("Sorry, something went wrong. Please try again.")
+        return CURRENT_STATE
+```
+
+### Database Operation Pattern
+```python
+async def save_user_data(user_id: int, data: dict) -> bool:
+    try:
+        async with get_db_connection() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "UPDATE users SET data = ? WHERE user_id = ?",
+                    (json.dumps(data), user_id)
+                )
+                logger.info(f"Successfully saved data for user {user_id}")
+                return True
+    except Exception as e:
+        logger.error(f"Failed to save data for user {user_id}: {str(e)}", exc_info=True)
+        return False
+```
+
+Refer to python-telegram-bot documentation and SQLite best practices for additional guidance on bot development and database management.
