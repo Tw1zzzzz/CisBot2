@@ -740,11 +740,11 @@ class FaceitAnalyzer:
             
             logger.info(f"✅ Получены данные API для {nickname}: {list(stats.keys())}")
             
-            # Извлекаем ELO данные с более подробным логированием
-            current_elo = stats.get('_current_elo', 0)
-            highest_elo = stats.get('_highest_elo', 0) 
-            lowest_elo = stats.get('_lowest_elo', 0)
-            matches = stats.get('_m', 0)
+            # Извлекаем ELO данные с более подробным логированием (ИСПРАВЛЕННЫЕ КЛЮЧИ)
+            current_elo = stats.get('current_elo', 0)
+            highest_elo = stats.get('highest_elo', 0) 
+            lowest_elo = stats.get('lowest_elo', 0)
+            matches = stats.get('m', 0)
             
             logger.info(f"📊 Извлеченные ELO данные для {nickname}:")
             logger.info(f"   Текущий ELO: {current_elo}")
@@ -812,18 +812,18 @@ class FaceitAnalyzer:
             
             result = {}
             
-            # Добавляем основную статистику если есть
+            # Добавляем основную статистику если есть (ИСПРАВЛЕННЫЕ КЛЮЧИ)
             if stats:
                 result['stats'] = {
-                    'matches': stats.get('_m', 0),
-                    'wins': stats.get('_w', 0),
-                    'kills': stats.get('_k', 0),
-                    'deaths': stats.get('_d', 0),
-                    'kdr': stats.get('_kdr', 0),
-                    'hltv_rating': stats.get('_hltv', 0),
-                    'current_elo': stats.get('_current_elo', 0),
-                    'highest_elo': stats.get('_highest_elo', 0),
-                    'lowest_elo': stats.get('_lowest_elo', 0)
+                    'matches': stats.get('m', 0),
+                    'wins': stats.get('w', 0),
+                    'kills': stats.get('k', 0),
+                    'deaths': stats.get('d', 0),
+                    'kdr': stats.get('kdr', 0),
+                    'hltv_rating': stats.get('hltv', 0),
+                    'current_elo': stats.get('current_elo', 0),
+                    'highest_elo': stats.get('highest_elo', 0),
+                    'lowest_elo': stats.get('lowest_elo', 0)
                 }
             
             # Диаграммы отключены

@@ -387,17 +387,45 @@ class SearchHandler:
                     except Exception as api_error:
                         logger.debug(f"Не удалось получить ELO статистику для {game_nickname}: {api_error}")
                     
-                    # Отображаем ELO с мин/макс значениями если API работает без ошибок (УЛУЧШЕННАЯ ПРОВЕРКА SEARCH)
-                    if elo_stats and not elo_stats.get('api_error', False):
+                    # Отображаем ELO с мин/макс значениями если есть данные (ИСПРАВЛЕННАЯ ЛОГИКА SEARCH)
+                    if elo_stats:
                         from bot.utils.cs2_data import format_faceit_elo_display
-                        # Показываем мин/макс даже если значения равны 0 - это тоже валидная статистика
+                        import time
+                        
+                        # Диагностика производительности API
+                        api_start_time = time.time()
+                        
+                        # Валидируем что lowest_elo и highest_elo являются числами
                         lowest_elo = elo_stats.get('lowest_elo', 0)
                         highest_elo = elo_stats.get('highest_elo', 0)
-                        logger.info(f"🔥 SEARCH: Показываем ELO с мин/макс для {game_nickname}: мин={lowest_elo} макс={highest_elo}")
-                        text += f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(faceit_elo, lowest_elo, highest_elo)}\n"
+                        
+                        # Дополнительная валидация ELO данных для поиска
+                        try:
+                            if isinstance(lowest_elo, (int, float)) and isinstance(highest_elo, (int, float)):
+                                # Проверяем логическую корректность (min <= current <= max)
+                                lowest_elo = int(lowest_elo) if lowest_elo >= 0 else 0
+                                highest_elo = int(highest_elo) if highest_elo >= 0 else 0
+                                
+                                # Логируем производительность API
+                                api_time = round((time.time() - api_start_time) * 1000, 2)
+                                
+                                # Показываем мин/макс даже если API вернул ошибку, но есть валидные данные
+                                if lowest_elo > 0 or highest_elo > 0:
+                                    logger.info(f"🔥 SEARCH: Показываем ELO с мин/макс для {game_nickname}: мин={lowest_elo} макс={highest_elo} (API: {api_time}ms)")
+                                    text += f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(faceit_elo, lowest_elo, highest_elo, game_nickname)}\n"
+                                else:
+                                    # Если мин/макс равны 0, показываем только текущий ELO
+                                    text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(faceit_elo)}\n"
+                            else:
+                                logger.warning(f"⚠️ SEARCH: ELO значения некорректного типа для {game_nickname}: lowest={type(lowest_elo)}, highest={type(highest_elo)}")
+                                # Fallback при некорректных типах данных
+                                text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(faceit_elo)}\n"
+                        except Exception as elo_validation_error:
+                            logger.error(f"Ошибка валидации ELO в поиске для {game_nickname}: {elo_validation_error}")
+                            # Fallback при ошибке валидации  
+                            text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(faceit_elo)}\n"
                     else:
-                        if elo_stats:
-                            logger.warning(f"⚠️ SEARCH: ELO статистика с ошибкой API или пуста: {elo_stats}")
+                        # Fallback на базовое отображение ELO
                         text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(faceit_elo)}\n"
                 else:
                     text += f"🎯 <b>ELO Faceit:</b> Не указан\n"

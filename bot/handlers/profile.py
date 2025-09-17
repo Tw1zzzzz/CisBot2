@@ -307,8 +307,8 @@ class ProfileHandler:
         except Exception as e:
             logger.warning(f"Не удалось получить ELO статистику для {profile.game_nickname}: {e}")
         
-        # Отображаем ELO с мин/макс значениями если API работает без ошибок (УЛУЧШЕННАЯ ПРОВЕРКА)
-        if elo_stats and not elo_stats.get('api_error', False):
+        # Отображаем ELO с мин/макс значениями если есть данные (ИСПРАВЛЕННАЯ ЛОГИКА)
+        if elo_stats:
             # Проверяем корректность значений перед передачей в format_faceit_elo_display()
             lowest_elo = elo_stats.get('lowest_elo', 0)
             highest_elo = elo_stats.get('highest_elo', 0)
@@ -318,8 +318,14 @@ class ProfileHandler:
                 if isinstance(lowest_elo, (int, float)) and isinstance(highest_elo, (int, float)):
                     lowest_elo = int(lowest_elo) if lowest_elo >= 0 else 0
                     highest_elo = int(highest_elo) if highest_elo >= 0 else 0
-                    logger.info(f"🔥 PROFILE: Показываем ELO с мин/макс для {profile.game_nickname}: мин={lowest_elo} макс={highest_elo}")
-                    text += f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile.faceit_elo, lowest_elo, highest_elo, profile.game_nickname)}\n"
+                    
+                    # Показываем мин/макс даже если API вернул ошибку, но есть валидные данные
+                    if lowest_elo > 0 or highest_elo > 0:
+                        logger.info(f"🔥 PROFILE: Показываем ELO с мин/макс для {profile.game_nickname}: мин={lowest_elo} макс={highest_elo}")
+                        text += f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile.faceit_elo, lowest_elo, highest_elo, profile.game_nickname)}\n"
+                    else:
+                        # Если мин/макс равны 0, показываем только текущий ELO
+                        text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
                 else:
                     logger.warning(f"⚠️ PROFILE: ELO значения некорректного типа для {profile.game_nickname}: lowest={type(lowest_elo)}, highest={type(highest_elo)}")
                     # Fallback на базовое отображение при некорректных данных
@@ -329,10 +335,7 @@ class ProfileHandler:
                 # Fallback на базовое отображение при ошибке валидации
                 text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
         else:
-            if elo_stats:
-                logger.warning(f"⚠️ PROFILE: ELO статистика с ошибкой API или пуста для {profile.game_nickname}: {elo_stats}")
-            else:
-                logger.debug(f"ELO статистика не получена для {profile.game_nickname}")
+            # Fallback на базовое отображение ELO
             text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
         
         # Faceit профиль
@@ -1421,8 +1424,8 @@ class ProfileHandler:
         except Exception as e:
             logger.warning(f"Не удалось получить ELO статистику для {profile.game_nickname}: {e}")
         
-        # Отображаем ELO с мин/макс значениями если доступно (УЛУЧШЕННАЯ ПРОВЕРКА В _format_full_profile_text)
-        if elo_stats and not elo_stats.get('api_error', False):
+        # Отображаем ELO с мин/макс значениями если есть данные (ИСПРАВЛЕННАЯ ЛОГИКА В _format_full_profile_text)
+        if elo_stats:
             # Проверяем корректность значений перед передачей в format_faceit_elo_display()
             lowest_elo = elo_stats.get('lowest_elo', 0)
             highest_elo = elo_stats.get('highest_elo', 0)
@@ -1432,8 +1435,14 @@ class ProfileHandler:
                 if isinstance(lowest_elo, (int, float)) and isinstance(highest_elo, (int, float)):
                     lowest_elo = int(lowest_elo) if lowest_elo >= 0 else 0
                     highest_elo = int(highest_elo) if highest_elo >= 0 else 0
-                    logger.info(f"🔥 FULL PROFILE: Показываем ELO с мин/макс для {profile.game_nickname}: мин={lowest_elo} макс={highest_elo}")
-                    text = f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile.faceit_elo, lowest_elo, highest_elo, profile.game_nickname)}\n"
+                    
+                    # Показываем мин/макс даже если API вернул ошибку, но есть валидные данные
+                    if lowest_elo > 0 or highest_elo > 0:
+                        logger.info(f"🔥 FULL PROFILE: Показываем ELO с мин/макс для {profile.game_nickname}: мин={lowest_elo} макс={highest_elo}")
+                        text = f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile.faceit_elo, lowest_elo, highest_elo, profile.game_nickname)}\n"
+                    else:
+                        # Если мин/макс равны 0, показываем только текущий ELO
+                        text = f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
                 else:
                     logger.warning(f"⚠️ FULL PROFILE: ELO значения некорректного типа для {profile.game_nickname}: lowest={type(lowest_elo)}, highest={type(highest_elo)}")
                     # Fallback на базовое отображение при некорректных данных
@@ -1443,10 +1452,7 @@ class ProfileHandler:
                 # Fallback на базовое отображение при ошибке валидации
                 text = f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
         else:
-            if elo_stats:
-                logger.warning(f"⚠️ FULL PROFILE: ELO статистика с ошибкой API или пуста для {profile.game_nickname}: {elo_stats}")
-            else:
-                logger.debug(f"ELO статистика не получена для полного профиля {profile.game_nickname}")
+            # Fallback на базовое отображение ELO
             text = f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
         
         text += f"👤 <b>Роль:</b> {format_role_display(profile.role)}\n\n"

@@ -365,20 +365,27 @@ def calculate_profile_compatibility(profile1, profile2) -> dict:
     # Совместимость ролей (простая проверка)
     role_compat = 1.0 if profile1.role != profile2.role else 0.7
     
-    # Веса для разных факторов
-    weights = {
-        'elo': 0.4,
-        'maps': 0.2,
-        'time': 0.25,
-        'role': 0.15
+    # Коэффициенты приоритета для разных факторов
+    priority_multipliers = {
+        'elo': 2.5,      # ELO получает 2.5x приоритет
+        'maps': 1.0,     # Карты остаются как есть
+        'time': 1.2,     # Время получает небольшой бонус
+        'role': 0.8      # Роли получают небольшой штраф
     }
     
-    total_compatibility = (
-        elo_compat * weights['elo'] +
-        maps_compat * weights['maps'] +
-        time_compat * weights['time'] +
-        role_compat * weights['role']
-    )
+    # Применяем мультипликаторы к совместимости
+    weighted_elo = elo_compat * priority_multipliers['elo']
+    weighted_maps = maps_compat * priority_multipliers['maps']
+    weighted_time = time_compat * priority_multipliers['time']
+    weighted_role = role_compat * priority_multipliers['role']
+    
+    # Суммируем взвешенные значения
+    total_weighted = weighted_elo + weighted_maps + weighted_time + weighted_role
+    
+    # Нормализуем результат (максимально возможное значение = 5.5)
+    max_possible = 1.0 * (priority_multipliers['elo'] + priority_multipliers['maps'] + 
+                         priority_multipliers['time'] + priority_multipliers['role'])
+    total_compatibility = total_weighted / max_possible
     
     return {
         'total': round(total_compatibility * 100),

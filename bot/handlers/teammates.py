@@ -161,14 +161,45 @@ class TeammatesHandler:
                 except Exception as e:
                     logger.debug(f"Не удалось получить ELO статистику для {partner_profile.game_nickname}: {e}")
                 
-                # Отображаем ELO с мин/макс значениями если доступно (МЯГКАЯ ПРОВЕРКА TEAMMATES)
-                if elo_stats and (elo_stats.get('lowest_elo', 0) > 0 or elo_stats.get('highest_elo', 0) > 0):
+                # Отображаем ELO с мин/макс значениями если есть данные (ИСПРАВЛЕННАЯ ЛОГИКА TEAMMATES)
+                if elo_stats:
                     from bot.utils.cs2_data import format_faceit_elo_display
-                    logger.info(f"🔥 TEAMMATES: Показываем ELO с мин/макс для {partner_profile.game_nickname}: мин={elo_stats.get('lowest_elo', 0)} макс={elo_stats.get('highest_elo', 0)}")
-                    elo_display = format_faceit_elo_display(partner_profile.faceit_elo, elo_stats.get('lowest_elo'), elo_stats.get('highest_elo'))
+                    
+                    # Проверка корректности ELO значений перед отображением
+                    lowest_elo = elo_stats.get('lowest_elo', 0)
+                    highest_elo = elo_stats.get('highest_elo', 0)
+                    
+                    # Дополнительная валидация ELO значений в тиммейтах
+                    try:
+                        if isinstance(lowest_elo, (int, float)) and isinstance(highest_elo, (int, float)):
+                            # Валидируем логическую последовательность мин/макс значений
+                            lowest_elo = int(lowest_elo) if lowest_elo >= 0 else 0
+                            highest_elo = int(highest_elo) if highest_elo >= 0 else 0
+                            current_elo = partner_profile.faceit_elo
+                            
+                            # Показываем мин/макс даже если API вернул ошибку, но есть валидные данные
+                            if lowest_elo > 0 or highest_elo > 0:
+                                # Проверка логической корректности для тиммейтов
+                                if lowest_elo <= current_elo <= highest_elo or (lowest_elo == 0 and highest_elo == 0):
+                                    logger.info(f"🔥 TEAMMATES: Показываем ELO с мин/макс для {partner_profile.game_nickname}: мин={lowest_elo} макс={highest_elo}")
+                                    elo_display = format_faceit_elo_display(current_elo, lowest_elo, highest_elo, partner_profile.game_nickname)
+                                else:
+                                    logger.warning(f"⚠️ TEAMMATES: Логическая некорректность ELO для {partner_profile.game_nickname}: current={current_elo}, min={lowest_elo}, max={highest_elo}")
+                                    # Fallback при некорректных данных
+                                    elo_display = format_elo_display(current_elo)
+                            else:
+                                # Если мин/макс равны 0, показываем только текущий ELO
+                                elo_display = format_elo_display(current_elo)
+                        else:
+                            logger.warning(f"⚠️ TEAMMATES: ELO значения некорректного типа для {partner_profile.game_nickname}: lowest={type(lowest_elo)}, highest={type(highest_elo)}")
+                            # Fallback при некорректных типах данных
+                            elo_display = format_elo_display(partner_profile.faceit_elo)
+                    except Exception as elo_validation_error:
+                        logger.error(f"Ошибка валидации ELO в тиммейтах для {partner_profile.game_nickname}: {elo_validation_error}")
+                        # Fallback при ошибке валидации
+                        elo_display = format_elo_display(partner_profile.faceit_elo)
                 else:
-                    if elo_stats:
-                        logger.warning(f"⚠️ TEAMMATES: ELO статистика получена, но мин/макс не валидны: {elo_stats}")
+                    # Fallback на базовое отображение ELO
                     elo_display = format_elo_display(partner_profile.faceit_elo)
                 
                 role = format_role_display(partner_profile.role)

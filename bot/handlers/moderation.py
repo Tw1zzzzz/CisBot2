@@ -129,17 +129,52 @@ class ModerationHandler:
         except Exception as e:
             logger.debug(f"Не удалось получить ELO статистику для {profile_data['game_nickname']}: {e}")
         
-        # Отображаем ELO с мин/макс значениями если API работает без ошибок (УЛУЧШЕННАЯ ПРОВЕРКА МОДЕРАЦИЯ)
-        if elo_stats and not elo_stats.get('api_error', False):
+        # Отображаем ELO с мин/макс значениями если есть данные (ИСПРАВЛЕННАЯ ЛОГИКА МОДЕРАЦИЯ)
+        if elo_stats:
             from bot.utils.cs2_data import format_faceit_elo_display
-            # Показываем мин/макс даже если значения равны 0 - это тоже валидная статистика
+            
+            # Валидация корректности значений lowest_elo и highest_elo
             lowest_elo = elo_stats.get('lowest_elo', 0)
             highest_elo = elo_stats.get('highest_elo', 0)
-            logger.info(f"🔥 MODERATION: Показываем ELO с мин/макс для {profile_data['game_nickname']}: мин={lowest_elo} макс={highest_elo}")
-            text += f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile_data['faceit_elo'], lowest_elo, highest_elo)}\n"
+            
+            # Дополнительная валидация ELO данных в модерации с диагностикой для модераторов
+            try:
+                if isinstance(lowest_elo, (int, float)) and isinstance(highest_elo, (int, float)):
+                    # Проверяем корректность значений
+                    lowest_elo = int(lowest_elo) if lowest_elo >= 0 else 0
+                    highest_elo = int(highest_elo) if highest_elo >= 0 else 0
+                    current_elo = profile_data['faceit_elo']
+                    
+                    # Показываем мин/макс даже если API вернул ошибку, но есть валидные данные
+                    if lowest_elo > 0 or highest_elo > 0:
+                        # Специальное логирование для модерации - показываем качество ELO данных
+                        data_quality = "✅ Валидная" if lowest_elo <= current_elo <= highest_elo or (lowest_elo == 0 and highest_elo == 0) else "⚠️ Подозрительная"
+                        logger.info(f"🔥 MODERATION: {data_quality} ELO статистика для {profile_data['game_nickname']}: текущий={current_elo}, мин={lowest_elo}, макс={highest_elo}")
+                        
+                        # Валидируем логическую последовательность ELO значений
+                        if lowest_elo <= current_elo <= highest_elo or (lowest_elo == 0 and highest_elo == 0):
+                            text += f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(current_elo, lowest_elo, highest_elo, profile_data['game_nickname'])}\n"
+                        else:
+                            logger.warning(f"⚠️ MODERATION: Логическая некорректность ELO для {profile_data['game_nickname']}: current={current_elo}, min={lowest_elo}, max={highest_elo}")
+                            # Fallback при некорректных данных от API
+                            text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(current_elo)} ⚠️\n"
+                            # Добавляем предупреждение для модератора
+                            text += f"<i>   ⚠️ Предупреждение: Некорректные мин/макс ELO в API</i>\n"
+                    else:
+                        # Если мин/макс равны 0, показываем только текущий ELO
+                        text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(current_elo)}\n"
+                else:
+                    logger.warning(f"⚠️ MODERATION: ELO значения некорректного типа для {profile_data['game_nickname']}: lowest={type(lowest_elo)}, highest={type(highest_elo)}")
+                    # Fallback при некорректных типах данных
+                    text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile_data['faceit_elo'])} ⚠️\n"
+                    text += f"<i>   ⚠️ Предупреждение: Проблемы с типами данных ELO</i>\n"
+            except Exception as elo_validation_error:
+                logger.error(f"Ошибка валидации ELO в модерации для {profile_data['game_nickname']}: {elo_validation_error}")
+                # Fallback при ошибке валидации
+                text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile_data['faceit_elo'])} ❌\n"
+                text += f"<i>   ❌ Ошибка: Не удалось валидировать ELO данные</i>\n"
         else:
-            if elo_stats:
-                logger.warning(f"⚠️ MODERATION: ELO статистика с ошибкой API или пуста: {elo_stats}")
+            # Fallback на базовое отображение ELO
             text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile_data['faceit_elo'])}\n"
         
         # Faceit профиль
