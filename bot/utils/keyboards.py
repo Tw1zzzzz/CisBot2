@@ -2,16 +2,36 @@
 Inline клавиатуры для CIS FINDER Bot
 Создано организацией Twizz_Project
 """
+import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from .cs2_data import CS2_ROLES, CS2_MAPS, PLAYTIME_OPTIONS, ELO_FILTER_RANGES, PROFILE_CATEGORIES, format_elo_filter_display
 
+logger = logging.getLogger(__name__)
+
 class Keyboards:
+    @staticmethod
+    def _log_button_creation(button_type: str, callback_data: str, context: str = ""):
+        """Helper method to log button creation with callback data"""
+        logger.debug(f"🔘 BUTTON CREATED: type='{button_type}', callback_data='{callback_data}', context='{context}'")
+    
+    @staticmethod
+    def _log_keyboard_generation(keyboard_name: str, has_back_button: bool = False, 
+                                back_callback: str = "", context: str = ""):
+        """Enhanced logging for keyboard generation"""
+        log_message = f"⌨️ KEYBOARD GENERATED: name='{keyboard_name}', has_back={has_back_button}"
+        if has_back_button and back_callback:
+            log_message += f", back_callback='{back_callback}'"
+        if context:
+            log_message += f", context='{context}'"
+        logger.debug(log_message)
+
     @staticmethod
     def main_menu():
         keyboard = [
             [InlineKeyboardButton("👤 Мой профиль", callback_data="profile_menu")],
             [InlineKeyboardButton("🔍 Поиск тиммейтов", callback_data="search_start")],
             [InlineKeyboardButton("💝 Мои тиммейты", callback_data="teammates_list")],
+            [InlineKeyboardButton("💌 История лайков", callback_data="likes_history")],
             [InlineKeyboardButton("⚙️ Настройки", callback_data="settings_menu")],
             [InlineKeyboardButton("❓ Помощь", callback_data="help")]
         ]
@@ -94,7 +114,11 @@ class Keyboards:
             callback_data = f"role_{role['name']}"
             keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
         
+        # Log back button creation
+        Keyboards._log_button_creation("back", "back", "role_selection keyboard")
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
+        
+        Keyboards._log_keyboard_generation("role_selection", True, "back", "Role selection with back button")
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
@@ -124,9 +148,12 @@ class Keyboards:
         if selected_maps:
             control_row.append(InlineKeyboardButton(f"✅ Готово ({len(selected_maps)})", callback_data="maps_done"))
         
+        # Log back button creation
+        Keyboards._log_button_creation("back", "back", "maps_selection keyboard")
         control_row.append(InlineKeyboardButton("🔙 Назад", callback_data="back"))
         keyboard.append(control_row)
         
+        Keyboards._log_keyboard_generation("maps_selection", True, "back", f"Maps selection with {len(selected_maps)} selected")
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
@@ -194,8 +221,13 @@ class Keyboards:
             [InlineKeyboardButton("📷 Добавить фото", callback_data="media_photo")],
             [InlineKeyboardButton("🎥 Добавить видео", callback_data="media_video")],
             [InlineKeyboardButton("⏭️ Пропустить", callback_data="media_skip")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back")]
         ]
+        
+        # Log back button creation - now consistent with ConversationHandler pattern
+        Keyboards._log_button_creation("back", "media_back", "media_selection keyboard - CONSISTENT CALLBACK")
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="media_back")])
+        
+        Keyboards._log_keyboard_generation("media_selection", True, "media_back", "Media selection with consistent media_back callback")
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
@@ -239,6 +271,7 @@ class Keyboards:
     def profile_edit_menu():
         keyboard = [
             [InlineKeyboardButton("🎯 Изменить ELO Faceit", callback_data="edit_elo")],
+            [InlineKeyboardButton("🎮 Изменить ник", callback_data="edit_nickname")],
             [InlineKeyboardButton("🔗 Изменить ссылку Faceit", callback_data="edit_faceit_url")],
             [InlineKeyboardButton("👤 Изменить роль", callback_data="edit_role")],
             [InlineKeyboardButton("🗺️ Изменить карты", callback_data="edit_maps")],
@@ -278,7 +311,10 @@ class Keyboards:
 
     @staticmethod
     def back_button(callback_data: str):
+        # Log back button creation
+        Keyboards._log_button_creation("back", callback_data, "single back button")
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data=callback_data)]]
+        Keyboards._log_keyboard_generation("back_button", True, callback_data, f"Single back button with callback: {callback_data}")
         return InlineKeyboardMarkup(keyboard)
 
     # Дополнительные клавиатуры для поиска
@@ -619,4 +655,43 @@ class Keyboards:
             [InlineKeyboardButton("🔙 К поиску", callback_data="search_menu")]
         ])
         
+        return InlineKeyboardMarkup(keyboard)
+    
+    # === ЛАЙКИ И ИСТОРИЯ ===
+    
+    @staticmethod
+    def likes_history_menu():
+        """Меню истории лайков"""
+        keyboard = [
+            [InlineKeyboardButton("💌 Новые лайки", callback_data="likes_new")],
+            [InlineKeyboardButton("📋 Все лайки", callback_data="likes_all")],
+            [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def like_response_buttons(liker_id: int):
+        """Клавиатура для ответа на конкретный лайк"""
+        keyboard = [
+            [
+                InlineKeyboardButton("❤️ Лайк в ответ", callback_data=f"reply_like_{liker_id}"),
+                InlineKeyboardButton("❌ Пропустить", callback_data=f"skip_like_{liker_id}")
+            ],
+            [InlineKeyboardButton("👁️ Посмотреть профиль", callback_data=f"view_profile_{liker_id}")],
+            [InlineKeyboardButton("🔙 К истории лайков", callback_data="likes_history")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def like_history_navigation(has_prev: bool = False, has_next: bool = False, page: int = 0):
+        """Навигация для истории лайков"""
+        keyboard = []
+        nav_row = []
+        if has_prev:
+            nav_row.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"likes_page_{page-1}"))
+        if has_next:
+            nav_row.append(InlineKeyboardButton("➡️ Далее", callback_data=f"likes_page_{page+1}"))
+        if nav_row:
+            keyboard.append(nav_row)
+        keyboard.append([InlineKeyboardButton("🔙 К истории лайков", callback_data="likes_history")])
         return InlineKeyboardMarkup(keyboard) 

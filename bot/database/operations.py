@@ -365,11 +365,20 @@ class DatabaseManager:
                 liker_id INTEGER NOT NULL,
                 liked_id INTEGER NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                viewed_at TIMESTAMP,
                 FOREIGN KEY (liker_id) REFERENCES users (user_id) ON DELETE CASCADE,
                 FOREIGN KEY (liked_id) REFERENCES users (user_id) ON DELETE CASCADE,
                 UNIQUE(liker_id, liked_id)
             )
         """)
+        
+        # Добавляем поле viewed_at для существующих БД (для persistent skip functionality)
+        try:
+            await db.execute("ALTER TABLE likes ADD COLUMN viewed_at TIMESTAMP")
+            logger.info("Добавлена колонка viewed_at в таблицу likes")
+        except Exception:
+            # Колонка уже существует
+            pass
 
         # Таблица тиммейтов (взаимные лайки)
         await db.execute("""
@@ -420,6 +429,7 @@ class DatabaseManager:
             "CREATE INDEX IF NOT EXISTS idx_profiles_moderation ON profiles (moderation_status)",
             "CREATE INDEX IF NOT EXISTS idx_likes_liker ON likes (liker_id)",
             "CREATE INDEX IF NOT EXISTS idx_likes_liked ON likes (liked_id)",
+            "CREATE INDEX IF NOT EXISTS idx_likes_viewed ON likes (viewed_at)",
             "CREATE INDEX IF NOT EXISTS idx_matches_users ON matches (user1_id, user2_id)",
             "CREATE INDEX IF NOT EXISTS idx_matches_active ON matches (is_active)",
             "CREATE INDEX IF NOT EXISTS idx_moderators_active ON moderators (is_active)"
@@ -1400,4 +1410,216 @@ class DatabaseManager:
                 return stats
         except Exception as e:
             logger.error(f"Ошибка получения статистики модерации: {e}")
-            return {} 
+            return {}
+
+    # === ИСТОРИЯ ЛАЙКОВ ===
+
+    async def get_received_likes(self, user_id: int, new_only: bool = False, limit: int = 10, offset: int = 0) -> List[dict]:
+        """
+        Получает лайки, полученные пользователем
+        
+        Args:
+            user_id: ID пользователя
+            new_only: Если True, возвращает только неотвеченные лайки
+            limit: Максимальное количество лайков
+            offset: Смещение для пагинации
+            
+        Returns:
+            List[dict]: Список лайков с информацией о лайкере
+        """
+        try:
+            async with self.acquire_connection() as db:
+                db.row_factory = aiosqlite.Row
+                
+                # Базовый запрос для получения лайков с профилем лайкера
+                base_query = """
+                    SELECT 
+                        l.liker_id,
+                        l.created_at,
+                        p.game_nickname,
+                        p.faceit_elo,
+                        p.role,
+                        p.media_type,
+                        p.media_file_id,
+                        u.username,
+                        u.first_name
+                    FROM likes l
+                    JOIN profiles p ON l.liker_id = p.user_id
+                    LEFT JOIN users u ON l.liker_id = u.user_id
+                    WHERE l.liked_id = ?
+                """
+                
+                params = [user_id]
+                
+                # Фильтр для новых лайков (неотвеченных и непросмотренных)
+                if new_only:
+                    base_query += """
+                        AND l.viewed_at IS NULL
+                        AND l.liker_id NOT IN (
+                            SELECT liked_id FROM likes 
+                            WHERE liker_id = ? 
+                            AND liked_id = l.liker_id
+                        )
+                    """
+                    params.append(user_id)
+                
+                base_query += """
+                    ORDER BY l.created_at DESC
+                    LIMIT ? OFFSET ?
+                """
+                params.extend([limit, offset])
+                
+                cursor = await db.execute(base_query, params)
+                rows = await cursor.fetchall()
+                
+                likes = []
+                for row in rows:
+                    like_data = dict(row)
+                    # Проверяем статус ответа
+                    like_data['response_status'] = await self._check_like_response_status_internal(
+                        db, row['liker_id'], user_id
+                    )
+                    likes.append(like_data)
+                
+                logger.info(f"Получено {len(likes)} лайков для пользователя {user_id} (new_only={new_only})")
+                return likes
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения полученных лайков для {user_id}: {e}")
+            return []
+
+    async def _check_like_response_status_internal(self, db: aiosqlite.Connection, liker_id: int, liked_id: int) -> str:
+        """
+        Внутренний метод для проверки статуса ответа на лайк
+        
+        Returns:
+            str: 'pending', 'replied', 'mutual'
+        """
+        try:
+            # Проверяем есть ли ответный лайк
+            cursor = await db.execute("""
+                SELECT COUNT(*) FROM likes 
+                WHERE liker_id = ? AND liked_id = ?
+            """, (liked_id, liker_id))
+            row = await cursor.fetchone()
+            
+            if row and row[0] > 0:
+                return 'mutual'  # Взаимный лайк
+            else:
+                return 'pending'  # Ожидает ответа
+                
+        except Exception as e:
+            logger.error(f"Ошибка проверки статуса ответа на лайк {liker_id}->{liked_id}: {e}")
+            return 'pending'
+
+    async def mark_like_as_viewed(self, liker_id: int, liked_id: int) -> bool:
+        """
+        Отмечает лайк как просмотренный/пропущенный путем установки viewed_at timestamp
+        
+        Args:
+            liker_id: ID пользователя, который поставил лайк
+            liked_id: ID пользователя, который получил лайк
+            
+        Returns:
+            bool: True если операция прошла успешно
+        """
+        try:
+            async with self.acquire_connection() as db:
+                # Обновляем viewed_at для пропуска лайка
+                cursor = await db.execute("""
+                    UPDATE likes 
+                    SET viewed_at = CURRENT_TIMESTAMP 
+                    WHERE liker_id = ? AND liked_id = ?
+                """, (liker_id, liked_id))
+                await db.commit()
+                
+                # Проверяем что запись была обновлена
+                if cursor.rowcount > 0:
+                    logger.info(f"Лайк от {liker_id} к {liked_id} отмечен как просмотренный с timestamp")
+                    return True
+                else:
+                    logger.warning(f"Лайк от {liker_id} к {liked_id} не найден для обновления")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Ошибка отметки лайка как просмотренного {liker_id}->{liked_id}: {e}")
+            return False
+
+    async def get_likes_statistics(self, user_id: int) -> dict:
+        """
+        Получает статистику лайков для пользователя
+        
+        Args:
+            user_id: ID пользователя
+            
+        Returns:
+            dict: Словарь со статистикой
+        """
+        try:
+            async with self.acquire_connection() as db:
+                stats = {}
+                
+                # Общее количество полученных лайков
+                cursor = await db.execute("""
+                    SELECT COUNT(*) FROM likes WHERE liked_id = ?
+                """, (user_id,))
+                row = await cursor.fetchone()
+                stats['total_received'] = row[0] if row else 0
+                
+                # Количество новых (неотвеченных и непросмотренных) лайков
+                cursor = await db.execute("""
+                    SELECT COUNT(*) FROM likes l1
+                    WHERE l1.liked_id = ?
+                    AND l1.viewed_at IS NULL
+                    AND l1.liker_id NOT IN (
+                        SELECT l2.liked_id FROM likes l2 
+                        WHERE l2.liker_id = ? 
+                        AND l2.liked_id = l1.liker_id
+                    )
+                """, (user_id, user_id))
+                row = await cursor.fetchone()
+                stats['new_likes'] = row[0] if row else 0
+                
+                # Количество взаимных лайков (тиммейтов)
+                cursor = await db.execute("""
+                    SELECT COUNT(*) FROM matches WHERE user1_id = ? OR user2_id = ?
+                """, (user_id, user_id))
+                row = await cursor.fetchone()
+                stats['mutual_likes'] = row[0] if row else 0
+                
+                # Количество отправленных лайков
+                cursor = await db.execute("""
+                    SELECT COUNT(*) FROM likes WHERE liker_id = ?
+                """, (user_id,))
+                row = await cursor.fetchone()
+                stats['sent_likes'] = row[0] if row else 0
+                
+                logger.info(f"Статистика лайков для {user_id}: {stats}")
+                return stats
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения статистики лайков для {user_id}: {e}")
+            return {
+                'total_received': 0,
+                'new_likes': 0,
+                'mutual_likes': 0,
+                'sent_likes': 0
+            }
+
+    async def check_like_response_status(self, liker_id: int, liked_id: int) -> str:
+        """
+        Проверяет статус ответа на лайк
+        
+        Args:
+            liker_id: ID пользователя, который поставил лайк
+            liked_id: ID пользователя, который получил лайк
+            
+        Returns:
+            str: 'pending', 'replied', 'mutual'
+        """
+        try:
+            async with self.acquire_connection() as db:
+                return await self._check_like_response_status_internal(db, liker_id, liked_id)
+        except Exception as e:
+            logger.error(f"Ошибка проверки статуса ответа на лайк {liker_id}->{liked_id}: {e}")
+            return 'pending' 

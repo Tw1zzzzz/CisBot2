@@ -26,6 +26,155 @@ class ProfileHandler:
     def __init__(self, db_manager: DatabaseManager):
         self.db = db_manager
 
+    def _log_back_navigation(self, user_id: int, current_state: str, target_state: str, 
+                           user_data_context: dict = None, additional_info: str = "",
+                           timestamp: str = None, navigation_validation: str = None,
+                           conversation_state: str = None, step_number: int = None):
+        """Centralized logging method for back button navigation with enhanced tracking"""
+        import datetime
+        
+        # Generate timestamp if not provided
+        if not timestamp:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Sanitize user data for privacy
+        safe_context = {}
+        if user_data_context:
+            for key, value in user_data_context.items():
+                if key in ['creating_profile', 'editing_profile']:
+                    # Sanitize profile data
+                    if isinstance(value, dict):
+                        safe_context[key] = {k: v for k, v in value.items() 
+                                           if k not in ['faceit_url', 'game_nickname']}
+                    else:
+                        safe_context[key] = str(type(value))
+                elif key in ['editing_field', 'editing_media', 'selecting_media_type']:
+                    safe_context[key] = value
+                else:
+                    safe_context[key] = str(type(value)) if value else None
+        
+        log_message = (f"🔙 BACK NAVIGATION: user_id={user_id}, timestamp={timestamp}, "
+                      f"current_state='{current_state}', target_state='{target_state}', "
+                      f"context={safe_context}")
+        
+        if conversation_state:
+            log_message += f", conversation_state='{conversation_state}'"
+            
+        if step_number:
+            log_message += f", step_number={step_number}"
+            
+        if navigation_validation:
+            log_message += f", validation='{navigation_validation}'"
+        
+        if additional_info:
+            log_message += f", info='{additional_info}'"
+            
+        # Use warning for potentially unexpected navigation patterns
+        if "unexpected" in additional_info.lower() or "incorrect" in additional_info.lower():
+            logger.warning(log_message)
+        else:
+            logger.info(log_message)
+    
+    def _validate_navigation_flow(self, current_state: str, target_state: str, user_id: int, 
+                                context_data: dict = None) -> dict:
+        """Validates navigation flow and provides recovery suggestions"""
+        # Define the correct profile creation sequence
+        correct_flow = {
+            "ENTERING_NICKNAME": "START",
+            "SELECTING_ELO": "ENTERING_NICKNAME", 
+            "ENTERING_FACEIT_URL": "SELECTING_ELO",
+            "SELECTING_ROLE": "ENTERING_FACEIT_URL",
+            "SELECTING_MAPS": "SELECTING_ROLE",
+            "SELECTING_PLAYTIME": "SELECTING_MAPS",
+            "SELECTING_CATEGORIES": "SELECTING_PLAYTIME",
+            "ENTERING_DESCRIPTION": "SELECTING_CATEGORIES",
+            "SELECTING_MEDIA": "ENTERING_DESCRIPTION"
+        }
+        
+        expected_previous = correct_flow.get(current_state)
+        is_valid = (target_state == expected_previous or 
+                   target_state in ["CANCEL_CREATION", "PROFILE_CREATION_START"])
+        
+        validation_result = {
+            "is_valid": is_valid,
+            "expected_target": expected_previous,
+            "actual_target": target_state,
+            "current_state": current_state,
+            "user_id": user_id,
+            "validation_message": "",
+            "recovery_suggestion": ""
+        }
+        
+        if is_valid:
+            validation_result["validation_message"] = f"Valid navigation: {current_state} → {target_state}"
+        else:
+            validation_result["validation_message"] = f"INVALID navigation: {current_state} → {target_state}, expected → {expected_previous}"
+            validation_result["recovery_suggestion"] = f"Should navigate to {expected_previous} instead of {target_state}"
+            
+        # Log validation results
+        if not is_valid:
+            logger.warning(f"🚨 NAVIGATION VALIDATION FAILED: {validation_result['validation_message']} for user {user_id}")
+            logger.warning(f"🔧 RECOVERY SUGGESTION: {validation_result['recovery_suggestion']}")
+        else:
+            logger.info(f"✅ NAVIGATION VALIDATED: {validation_result['validation_message']} for user {user_id}")
+            
+        return validation_result
+    
+    def _log_state_transition(self, user_id: int, from_state: str, to_state: str,
+                            trigger: str, user_data_context: dict = None,
+                            validation_result: dict = None):
+        """Logs state transitions with comprehensive context and validation"""
+        import datetime
+        
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Sanitize user context for privacy
+        safe_context = {}
+        if user_data_context:
+            for key, value in user_data_context.items():
+                if key in ['creating_profile', 'editing_profile']:
+                    if isinstance(value, dict):
+                        # Only include non-sensitive profile data
+                        safe_context[key] = {
+                            k: v for k, v in value.items() 
+                            if k in ['role', 'categories', 'description_length'] and v is not None
+                        }
+                        # Add counts for arrays without exposing data
+                        if 'maps' in value:
+                            safe_context[key]['maps_count'] = len(value['maps']) if value['maps'] else 0
+                        if 'playtime_slots' in value:
+                            safe_context[key]['playtime_count'] = len(value['playtime_slots']) if value['playtime_slots'] else 0
+                elif key in ['editing_field', 'editing_media', 'selecting_media_type']:
+                    safe_context[key] = value
+        
+        log_message = (
+            f"🔄 STATE TRANSITION: user_id={user_id}, timestamp={timestamp}, "
+            f"from='{from_state}', to='{to_state}', trigger='{trigger}', context={safe_context}"
+        )
+        
+        if validation_result:
+            log_message += f", validation={validation_result['validation_message']}"
+            
+        if validation_result and not validation_result['is_valid']:
+            logger.error(log_message)
+        else:
+            logger.info(log_message)
+
+    def _get_step_number_from_state(self, state: str) -> int:
+        """Maps conversation states to step numbers for better tracking"""
+        state_steps = {
+            "ENTERING_NICKNAME": 1,
+            "SELECTING_ELO": 2,
+            "ENTERING_FACEIT_URL": 3,
+            "SELECTING_ROLE": 4,
+            "SELECTING_MAPS": 5,
+            "SELECTING_PLAYTIME": 6,
+            "SELECTING_CATEGORIES": 7,
+            "ENTERING_DESCRIPTION": 8,
+            "SELECTING_MEDIA": 9
+        }
+        return state_steps.get(state, 0)
+    
     async def profile_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /profile - показывает профиль пользователя с медиа"""
         user_id = update.effective_user.id
@@ -160,14 +309,30 @@ class ProfileHandler:
         
         # Отображаем ELO с мин/макс значениями если API работает без ошибок (УЛУЧШЕННАЯ ПРОВЕРКА)
         if elo_stats and not elo_stats.get('api_error', False):
-            # Показываем мин/макс даже если значения равны 0 - это тоже валидная статистика
+            # Проверяем корректность значений перед передачей в format_faceit_elo_display()
             lowest_elo = elo_stats.get('lowest_elo', 0)
             highest_elo = elo_stats.get('highest_elo', 0)
-            logger.info(f"🔥 Показываем ELO с мин/макс для {profile.game_nickname}: мин={lowest_elo} макс={highest_elo}")
-            text += f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile.faceit_elo, lowest_elo, highest_elo)}\n"
+            
+            # Дополнительная валидация ELO значений
+            try:
+                if isinstance(lowest_elo, (int, float)) and isinstance(highest_elo, (int, float)):
+                    lowest_elo = int(lowest_elo) if lowest_elo >= 0 else 0
+                    highest_elo = int(highest_elo) if highest_elo >= 0 else 0
+                    logger.info(f"🔥 PROFILE: Показываем ELO с мин/макс для {profile.game_nickname}: мин={lowest_elo} макс={highest_elo}")
+                    text += f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile.faceit_elo, lowest_elo, highest_elo, profile.game_nickname)}\n"
+                else:
+                    logger.warning(f"⚠️ PROFILE: ELO значения некорректного типа для {profile.game_nickname}: lowest={type(lowest_elo)}, highest={type(highest_elo)}")
+                    # Fallback на базовое отображение при некорректных данных
+                    text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
+            except Exception as elo_validation_error:
+                logger.error(f"Ошибка валидации ELO для {profile.game_nickname}: {elo_validation_error}")
+                # Fallback на базовое отображение при ошибке валидации
+                text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
         else:
             if elo_stats:
-                logger.warning(f"⚠️ ELO статистика с ошибкой API или пуста: {elo_stats}")
+                logger.warning(f"⚠️ PROFILE: ELO статистика с ошибкой API или пуста для {profile.game_nickname}: {elo_stats}")
+            else:
+                logger.debug(f"ELO статистика не получена для {profile.game_nickname}")
             text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
         
         # Faceit профиль
@@ -280,7 +445,8 @@ class ProfileHandler:
             "Это займет всего несколько минут.\n\n"
             "<b>Шаг 1/7:</b> Введите ваш игровой ник\n\n"
             "🎮 Это имя будет видно другим игрокам в поиске.\n"
-            "Используйте ваш основной игровой ник (Steam, Discord, etc.)",
+            "📊 <b>Важно:</b> Ваш ник используется для получения статистики ELO с Faceit.\n"
+            "Используйте ваш основной игровой ник (Steam, Discord, Faceit).",
             parse_mode='HTML'
         )
         
@@ -310,6 +476,22 @@ class ProfileHandler:
         # Сохраняем ник
         context.user_data['creating_profile']['game_nickname'] = nickname
         
+        # Log state transition with validation
+        validation_result = self._validate_navigation_flow(
+            current_state="ENTERING_NICKNAME",
+            target_state="SELECTING_ELO", 
+            user_id=update.effective_user.id,
+            context_data=context.user_data
+        )
+        self._log_state_transition(
+            user_id=update.effective_user.id,
+            from_state="ENTERING_NICKNAME",
+            to_state="SELECTING_ELO",
+            trigger="nickname_input_valid",
+            user_data_context=context.user_data,
+            validation_result=validation_result
+        )
+        
         # Переходим к выбору ELO
         text = (
             "✅ <b>Игровой ник сохранен!</b>\n\n"
@@ -328,6 +510,17 @@ class ProfileHandler:
         await query.answer()
         
         if query.data == "back":
+            # Enhanced back button logging with step validation
+            self._log_back_navigation(
+                user_id=update.effective_user.id,
+                current_state="SELECTING_ELO",
+                target_state="CANCEL_CREATION",
+                user_data_context=context.user_data,
+                additional_info="Step 2 (SELECTING_ELO) → CANCEL: Back from ELO selection cancels profile creation",
+                navigation_validation="EXPECTED - ELO is step 2, back cancels creation",
+                conversation_state="PROFILE_CREATION",
+                step_number=2
+            )
             return await self.cancel_creation(update, context)
         elif query.data == "elo_back":
             # Возврат к меню выбора ELO из экрана ввода точного ELO
@@ -356,6 +549,23 @@ class ProfileHandler:
             elo = int(text)
             if 1 <= elo <= 6000:
                 context.user_data['creating_profile']['faceit_elo'] = elo
+                
+                # Log state transition with validation
+                validation_result = self._validate_navigation_flow(
+                    current_state="SELECTING_ELO",
+                    target_state="ENTERING_FACEIT_URL", 
+                    user_id=update.effective_user.id,
+                    context_data=context.user_data
+                )
+                self._log_state_transition(
+                    user_id=update.effective_user.id,
+                    from_state="SELECTING_ELO",
+                    to_state="ENTERING_FACEIT_URL",
+                    trigger="elo_input_valid",
+                    user_data_context=context.user_data,
+                    validation_result=validation_result
+                )
+                
                 await update.message.reply_text(
                     f"✅ ELO сохранено: {format_elo_display(elo)}\n\n"
                     "<b>Шаг 3/7:</b> Отправьте ссылку на ваш профиль Faceit\n\n"
@@ -384,6 +594,22 @@ class ProfileHandler:
             if validate_faceit_url(text):
                 context.user_data['creating_profile']['faceit_url'] = text
                 
+                # Log state transition with validation
+                validation_result = self._validate_navigation_flow(
+                    current_state="ENTERING_FACEIT_URL",
+                    target_state="SELECTING_ROLE", 
+                    user_id=update.effective_user.id,
+                    context_data=context.user_data
+                )
+                self._log_state_transition(
+                    user_id=update.effective_user.id,
+                    from_state="ENTERING_FACEIT_URL",
+                    to_state="SELECTING_ROLE",
+                    trigger="faceit_url_valid",
+                    user_data_context=context.user_data,
+                    validation_result=validation_result
+                )
+                
                 await update.message.reply_text(
                     f"✅ Faceit профиль добавлен!\n\n"
                     "<b>Шаг 4/7:</b> Выберите вашу основную роль в команде:",
@@ -408,7 +634,25 @@ class ProfileHandler:
         await query.answer()
         
         if query.data == "back":
-            return await self.start_profile_creation(update, context)
+            # Enhanced back button logging with step validation
+            self._log_back_navigation(
+                user_id=update.effective_user.id,
+                current_state="SELECTING_ROLE",
+                target_state="ENTERING_FACEIT_URL",
+                user_data_context=context.user_data,
+                additional_info="Step 4 (SELECTING_ROLE) → Step 3 (ENTERING_FACEIT_URL): Correct navigation flow",
+                navigation_validation="EXPECTED - Role selection goes back to Faceit URL",
+                conversation_state="PROFILE_CREATION",
+                step_number=4
+            )
+            # Navigate back to faceit URL input step
+            text = (
+                "✅ Роль будет выбрана позже.\n\n"
+                "<b>Шаг 3/7:</b> Отправьте ссылку на ваш профиль Faceit\n\n"
+                "Пример: https://www.faceit.com/ru/players/nickname"
+            )
+            await query.edit_message_text(text, reply_markup=Keyboards.back_button("elo_back"), parse_mode='HTML')
+            return ENTERING_FACEIT_URL
             
         role_name = query.data.replace("role_", "")
         role_data = get_role_by_name(role_name)
@@ -422,6 +666,22 @@ class ProfileHandler:
         
         # Сохраняем выбранную роль
         context.user_data['creating_profile']['role'] = role_name
+        
+        # Log state transition with validation
+        validation_result = self._validate_navigation_flow(
+            current_state="SELECTING_ROLE",
+            target_state="SELECTING_MAPS", 
+            user_id=update.effective_user.id,
+            context_data=context.user_data
+        )
+        self._log_state_transition(
+            user_id=update.effective_user.id,
+            from_state="SELECTING_ROLE",
+            to_state="SELECTING_MAPS",
+            trigger="role_selected",
+            user_data_context=context.user_data,
+            validation_result=validation_result
+        )
         
         from bot.utils.cs2_data import format_role_display
         await query.edit_message_text(
@@ -441,7 +701,23 @@ class ProfileHandler:
         current_maps = context.user_data['creating_profile']['maps']
         
         if query.data == "back":
-            return await self.handle_faceit_url(update, context)
+            # Enhanced back button logging - NAVIGATION BUG FIXED!
+            self._log_back_navigation(
+                user_id=update.effective_user.id,
+                current_state="SELECTING_MAPS",
+                target_state="SELECTING_ROLE",
+                user_data_context=context.user_data,
+                additional_info="Correct navigation: Step 5 (SELECTING_MAPS) → Step 4 (SELECTING_ROLE)",
+                navigation_validation="CORRECTED - Previously went to ENTERING_FACEIT_URL incorrectly",
+                step_number=5
+            )
+            # Return to role selection instead of faceit URL input
+            text = (
+                f"✅ Карты выбраны: {', '.join(current_maps) if current_maps else 'Пока не выбраны'}\n\n"
+                "<b>Шаг 4/7:</b> Выберите вашу основную роль в команде:"
+            )
+            await query.edit_message_text(text, reply_markup=Keyboards.role_selection(), parse_mode='HTML')
+            return SELECTING_ROLE
         elif query.data == "maps_done":
             if len(current_maps) == 0:
                 await query.answer("❌ Выберите хотя бы одну карту!", show_alert=True)
@@ -480,7 +756,25 @@ class ProfileHandler:
         current_slots = context.user_data['creating_profile']['playtime_slots']
         
         if query.data == "back":
-            return await self.handle_maps_selection(update, context)
+            # Enhanced back button logging with step validation
+            self._log_back_navigation(
+                user_id=update.effective_user.id,
+                current_state="SELECTING_PLAYTIME",
+                target_state="SELECTING_MAPS",
+                user_data_context=context.user_data,
+                additional_info="Step 6 (SELECTING_PLAYTIME) → Step 5 (SELECTING_MAPS): Correct navigation flow",
+                navigation_validation="EXPECTED - Playtime selection goes back to maps selection",
+                conversation_state="PROFILE_CREATION",
+                step_number=6
+            )
+            # Navigate back to maps selection
+            current_maps = context.user_data['creating_profile']['maps']
+            text = (
+                f"✅ Время игры будет выбрано позже.\n\n"
+                "<b>Шаг 5/7:</b> Выберите ваши любимые карты (можно выбрать несколько):"
+            )
+            await query.edit_message_text(text, reply_markup=Keyboards.maps_selection(current_maps), parse_mode='HTML')
+            return SELECTING_MAPS
         elif query.data == "time_done":
             if len(current_slots) == 0:
                 await query.answer("❌ Выберите хотя бы один временной промежуток!", show_alert=True)
@@ -531,7 +825,32 @@ class ProfileHandler:
         current_categories = context.user_data['creating_profile']['categories']
         
         if query.data == "back":
-            return await self.handle_playtime_selection(update, context)
+            # Enhanced back button logging with step validation
+            self._log_back_navigation(
+                user_id=update.effective_user.id,
+                current_state="SELECTING_CATEGORIES",
+                target_state="SELECTING_PLAYTIME",
+                user_data_context=context.user_data,
+                additional_info="Step 7 (SELECTING_CATEGORIES) → Step 6 (SELECTING_PLAYTIME): Correct navigation flow",
+                navigation_validation="EXPECTED - Categories selection goes back to playtime selection",
+                conversation_state="PROFILE_CREATION",
+                step_number=7
+            )
+            # Navigate back to playtime selection
+            current_slots = context.user_data['creating_profile']['playtime_slots']
+            # Format selected times for display
+            selected_names = []
+            for slot_id in current_slots:
+                time_option = next((t for t in PLAYTIME_OPTIONS if t['id'] == slot_id), None)
+                if time_option:
+                    selected_names.append(time_option['name'])
+            time_display = ', '.join(selected_names) if selected_names else "Пока не выбрано"
+            text = (
+                f"✅ Категории будут выбраны позже.\n\n"
+                "<b>Шаг 6/7:</b> Выберите удобное время игры (можно выбрать несколько):"
+            )
+            await query.edit_message_text(text, reply_markup=Keyboards.playtime_selection(current_slots), parse_mode='HTML')
+            return SELECTING_PLAYTIME
         elif query.data == "categories_done":
             if len(current_categories) == 0:
                 await query.answer("❌ Выберите хотя бы одну категорию!", show_alert=True)
@@ -578,7 +897,27 @@ class ProfileHandler:
                 context.user_data['creating_profile']['description'] = None
                 return await self.start_media_selection(update, context)
             elif query.data == "back":
-                return await self.handle_maps_selection(update, context)
+                # Enhanced back button logging - NAVIGATION BUG FIXED!
+                self._log_back_navigation(
+                    user_id=update.effective_user.id,
+                    current_state="ENTERING_DESCRIPTION",
+                    target_state="SELECTING_CATEGORIES",
+                    user_data_context=context.user_data,
+                    additional_info="Correct navigation: Step 8 (ENTERING_DESCRIPTION) → Step 7 (SELECTING_CATEGORIES)",
+                    navigation_validation="CORRECTED - Previously went to SELECTING_MAPS incorrectly",
+                    step_number=8
+                )
+                # Return to categories selection instead of maps selection
+                current_categories = context.user_data['creating_profile']['categories']
+                from bot.utils.cs2_data import format_categories_display
+                categories_text = format_categories_display(current_categories) if current_categories else "Пока не выбраны"
+                text = (
+                    f"✅ Категории: {categories_text}\n\n"
+                    "<b>Шаг 7/9:</b> Выберите категории, которые вас интересуют.\n"
+                    "Можно выбрать несколько категорий:"
+                )
+                await query.edit_message_text(text, reply_markup=Keyboards.categories_selection(current_categories), parse_mode='HTML')
+                return SELECTING_CATEGORIES
         
         elif update.message:
             # Получен текст описания
@@ -675,13 +1014,39 @@ class ProfileHandler:
                 return await self.save_profile(update, context)
                 
             elif query.data == "media_back":
+                # Enhanced back button logging for media selection - LOOP BUG FIXED!
+                editing_mode = context.user_data.get('editing_media', False)
+                target_state = "EDIT_MEDIA_MENU" if editing_mode else "ENTERING_DESCRIPTION"
+                self._log_back_navigation(
+                    user_id=update.effective_user.id,
+                    current_state="MEDIA_TYPE_SELECTION",
+                    target_state=target_state,
+                    user_data_context=context.user_data,
+                    additional_info=f"Media back navigation fixed: editing_mode={editing_mode}, now goes to correct previous step",
+                    navigation_validation="CORRECTED - Previously created a loop back to media selection",
+                    step_number=9
+                )
+                
                 # Проверяем, редактируем ли мы медиа или создаем профиль
                 if context.user_data.get('editing_media'):
                     # Возвращаемся к меню редактирования медиа
                     await self.edit_media(update, context, context.user_data.get('editing_profile'))
                 else:
-                    # Возвращаемся к выбору медиа при создании профиля
-                    return await self.start_media_selection(update, context)
+                    # FIXED: Возвращаемся к предыдущему шагу (описание) вместо зацикливания
+                    description = context.user_data['creating_profile'].get('description')
+                    if description:
+                        text = (
+                            f"✅ Описание добавлено!\n\n"
+                            "<b>Шаг 8/9:</b> Напишите немного о себе (стиль игры, цели, характер).\n"
+                            "Или нажмите 'Пропустить', чтобы добавить описание позже:"
+                        )
+                    else:
+                        text = (
+                            "<b>Шаг 8/9:</b> Напишите немного о себе (стиль игры, цели, характер).\n"
+                            "Или нажмите 'Пропустить', чтобы добавить описание позже:"
+                        )
+                    await query.edit_message_text(text, reply_markup=Keyboards.skip_description(), parse_mode='HTML')
+                    return ENTERING_DESCRIPTION
                 
         elif update.message:
             # Получили медиа файл
@@ -942,6 +1307,10 @@ class ProfileHandler:
             # Завершение выбора карт при редактировании
             logger.info(f"Обрабатываем maps_done для пользователя {user_id}")
             await self.handle_maps_edit_done(update, context)
+        elif data == "back" and context.user_data.get('editing_field') == 'role':
+            # Возврат из редактирования роли
+            logger.info(f"Возврат из редактирования роли для пользователя {user_id}")
+            await self.handle_role_selection_edit(update, context)
         elif data == "back" and context.user_data.get('editing_field') == 'favorite_maps':
             # Возврат из редактирования карт
             logger.info(f"Возврат из редактирования карт для пользователя {user_id}")
@@ -987,10 +1356,18 @@ class ProfileHandler:
 
     async def view_full_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показывает полный профиль пользователя с медиа"""
-        query = update.callback_query
-        await query.answer()
-        
-        user_id = query.from_user.id
+        # Handle both callback_query and message contexts
+        if update.callback_query:
+            query = update.callback_query
+            await query.answer()
+            user_id = query.from_user.id
+            is_callback = True
+        elif update.message:
+            user_id = update.message.from_user.id
+            is_callback = False
+        else:
+            logger.error("view_full_profile: No callback_query or message found in update")
+            return
         
         # 🔥 ОТЛАДКА: Проверяем существование профиля ДО get_profile
         has_profile_before = await self.db.has_profile(user_id)
@@ -1005,10 +1382,16 @@ class ProfileHandler:
         
         if not profile:
             logger.error(f"🔥 view_full_profile: Профиль НЕ НАЙДЕН для user_id={user_id}, has_before={has_profile_before}, has_after={has_profile_after}")
-            await query.edit_message_text(
-                "❌ Профиль не найден",
-                reply_markup=Keyboards.back_button("profile_menu")
-            )
+            if is_callback:
+                await query.edit_message_text(
+                    "❌ Профиль не найден",
+                    reply_markup=Keyboards.back_button("profile_menu")
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Профиль не найден",
+                    reply_markup=Keyboards.back_button("profile_menu")
+                )
             return
         
         # Форматируем полный профиль
@@ -1016,8 +1399,9 @@ class ProfileHandler:
         text += await self._format_full_profile_text(profile)
         
         # Отправляем профиль с медиа
+        chat_id = query.message.chat.id if is_callback else update.message.chat.id
         await self.send_profile_with_media(
-            chat_id=query.message.chat.id,
+            chat_id=chat_id,
             profile=profile,
             text=text,
             reply_markup=Keyboards.profile_view_menu(),
@@ -1037,13 +1421,32 @@ class ProfileHandler:
         except Exception as e:
             logger.warning(f"Не удалось получить ELO статистику для {profile.game_nickname}: {e}")
         
-        # Отображаем ELO с мин/макс значениями если доступно (МЯГКАЯ ПРОВЕРКА В _format_full_profile_text)
-        if elo_stats and (elo_stats.get('lowest_elo', 0) > 0 or elo_stats.get('highest_elo', 0) > 0):
-            logger.info(f"🔥 FULL PROFILE: Показываем ELO с мин/макс для {profile.game_nickname}: мин={elo_stats.get('lowest_elo', 0)} макс={elo_stats.get('highest_elo', 0)}")
-            text = f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile.faceit_elo, elo_stats.get('lowest_elo'), elo_stats.get('highest_elo'))}\n"
+        # Отображаем ELO с мин/макс значениями если доступно (УЛУЧШЕННАЯ ПРОВЕРКА В _format_full_profile_text)
+        if elo_stats and not elo_stats.get('api_error', False):
+            # Проверяем корректность значений перед передачей в format_faceit_elo_display()
+            lowest_elo = elo_stats.get('lowest_elo', 0)
+            highest_elo = elo_stats.get('highest_elo', 0)
+            
+            # Дополнительная валидация ELO значений в полном профиле
+            try:
+                if isinstance(lowest_elo, (int, float)) and isinstance(highest_elo, (int, float)):
+                    lowest_elo = int(lowest_elo) if lowest_elo >= 0 else 0
+                    highest_elo = int(highest_elo) if highest_elo >= 0 else 0
+                    logger.info(f"🔥 FULL PROFILE: Показываем ELO с мин/макс для {profile.game_nickname}: мин={lowest_elo} макс={highest_elo}")
+                    text = f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile.faceit_elo, lowest_elo, highest_elo, profile.game_nickname)}\n"
+                else:
+                    logger.warning(f"⚠️ FULL PROFILE: ELO значения некорректного типа для {profile.game_nickname}: lowest={type(lowest_elo)}, highest={type(highest_elo)}")
+                    # Fallback на базовое отображение при некорректных данных
+                    text = f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
+            except Exception as elo_validation_error:
+                logger.error(f"Ошибка валидации ELO в полном профиле для {profile.game_nickname}: {elo_validation_error}")
+                # Fallback на базовое отображение при ошибке валидации
+                text = f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
         else:
             if elo_stats:
-                logger.warning(f"⚠️ FULL PROFILE: ELO статистика получена, но мин/макс не валидны: {elo_stats}")
+                logger.warning(f"⚠️ FULL PROFILE: ELO статистика с ошибкой API или пуста для {profile.game_nickname}: {elo_stats}")
+            else:
+                logger.debug(f"ELO статистика не получена для полного профиля {profile.game_nickname}")
             text = f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
         
         text += f"👤 <b>Роль:</b> {format_role_display(profile.role)}\n\n"
@@ -1141,6 +1544,8 @@ class ProfileHandler:
         # Определяем тип редактирования
         if data == "edit_elo":
             await self.edit_elo(update, context, profile)
+        elif data == "edit_nickname":
+            await self.edit_nickname(update, context, profile)
         elif data == "edit_faceit_url":
             await self.edit_faceit_url(update, context, profile)
         elif data == "edit_role":
@@ -1179,6 +1584,36 @@ class ProfileHandler:
         # Сохраняем контекст редактирования
         context.user_data['editing_field'] = 'faceit_elo'
         context.user_data['editing_profile'] = profile
+
+    async def edit_nickname(self, update: Update, context: ContextTypes.DEFAULT_TYPE, profile):
+        """Редактирование игрового ника"""
+        query = update.callback_query
+        await query.answer()
+        
+        text = (
+            f"🎮 <b>Изменение игрового ника</b>\n\n"
+            f"<b>Текущий ник:</b> {profile.game_nickname}\n\n"
+            "Введите новый игровой ник:\n"
+            "• От 2 до 32 символов\n"
+            "• Буквы, цифры, дефисы, подчеркивания\n\n"
+            "📊 <b>Важно:</b> Ник используется для получения ELO статистики с Faceit.\n"
+            "После изменения ника обновится отображение мин/макс ELO значений."
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("🔙 Назад", callback_data="profile_edit")]
+        ]
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+        
+        # Сохраняем контекст для ожидания текста
+        context.user_data['editing_field'] = 'game_nickname'
+        context.user_data['editing_profile'] = profile
+        context.user_data['awaiting_nickname'] = True
 
     async def edit_role(self, update: Update, context: ContextTypes.DEFAULT_TYPE, profile):
         """Редактирование роли"""
@@ -1850,7 +2285,18 @@ class ProfileHandler:
         user_id = query.from_user.id
         data = query.data
         
-        if data.startswith("role_"):
+        if data == "back":
+            # Пользователь нажал "Назад" - возвращаемся к меню редактирования профиля
+            logger.info(f"User {user_id} pressed back button in role selection during edit - returning to edit menu")
+            
+            # Очищаем временные данные редактирования
+            self.clear_editing_context(context)
+            
+            # Возвращаемся к меню редактирования профиля
+            await self.show_edit_menu(update, context)
+            return
+            
+        elif data.startswith("role_"):
             role_name = data.replace("role_", "")
             
             try:
@@ -2078,6 +2524,60 @@ class ProfileHandler:
                     "Ссылка должна быть в формате:\n"
                     "https://www.faceit.com/ru/players/nickname\n\n"
                     "Попробуйте еще раз:"
+                )
+            return
+
+        # Обработка ввода игрового ника
+        if context.user_data.get('awaiting_nickname') and context.user_data.get('editing_field') == 'game_nickname':
+            # Валидация ника
+            if len(text) < 2 or len(text) > 32:
+                await update.message.reply_text(
+                    "❌ Игровой ник должен быть от 2 до 32 символов.\n"
+                    "Попробуйте еще раз:"
+                )
+                return
+            
+            # Проверка на допустимые символы
+            import re
+            if not re.match(r'^[a-zA-Z0-9а-яА-Я_-]+$', text):
+                await update.message.reply_text(
+                    "❌ Ник может содержать только буквы, цифры, дефисы и подчеркивания.\n"
+                    "Попробуйте еще раз:"
+                )
+                return
+            
+            # Проверка что ник не состоит только из цифр
+            if text.isdigit():
+                await update.message.reply_text(
+                    "❌ Ник не может состоять только из цифр.\n"
+                    "Попробуйте еще раз:"
+                )
+                return
+            
+            try:
+                # Обновляем профиль в БД
+                success = await self.db.update_profile(user_id, game_nickname=text)
+                
+                if success:
+                    await update.message.reply_text(
+                        f"✅ <b>Игровой ник обновлен!</b>\n\n"
+                        f"<b>Новый ник:</b> {text}",
+                        parse_mode='HTML'
+                    )
+                    
+                    # Очищаем флаги редактирования
+                    self.clear_editing_context(context)
+                    
+                    # Возвращаемся к полному профилю
+                    await self.view_full_profile(update, context)
+                else:
+                    await update.message.reply_text(
+                        "❌ Ошибка при сохранении ника. Попробуйте еще раз."
+                    )
+            except Exception as e:
+                logger.error(f"Ошибка при сохранении игрового ника: {e}")
+                await update.message.reply_text(
+                    "❌ Произошла ошибка при сохранении. Попробуйте еще раз."
                 )
             return
         

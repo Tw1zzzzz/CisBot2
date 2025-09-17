@@ -5,7 +5,7 @@
 import logging
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
-from telegram import Bot
+from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import TelegramError
 from bot.database.operations import DatabaseManager
 
@@ -54,14 +54,26 @@ class NotificationManager:
                 f"Вам поставил лайк: <b>{liker_profile.game_nickname}</b>\n"
                 f"Ранг: {liker_profile.faceit_elo} ELO\n"
                 f"Роль: {liker_profile.role}\n\n"
-                f"💡 Поставьте лайк в ответ, чтобы создать тиммейт!"
+                f"💡 Ответьте на лайк или пропустите:"
             )
+            
+            # Создаем интерактивную клавиатуру
+            keyboard = [
+                [
+                    InlineKeyboardButton("❤️ Лайк в ответ", callback_data=f"reply_like_{liker_user_id}"),
+                    InlineKeyboardButton("❌ Пропустить", callback_data=f"skip_like_{liker_user_id}")
+                ],
+                [InlineKeyboardButton("👁️ Посмотреть профиль", callback_data=f"view_profile_{liker_user_id}")],
+                [InlineKeyboardButton("📋 История лайков", callback_data="likes_history")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
             
             # Отправляем уведомление
             await self.bot.send_message(
                 chat_id=liked_user_id,
                 text=message,
-                parse_mode='HTML'
+                parse_mode='HTML',
+                reply_markup=reply_markup
             )
             
             # Обновляем кэш для защиты от спама

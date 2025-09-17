@@ -204,8 +204,26 @@ class StartHandler:
             await self.handle_filter_update(query, data)
         elif data.startswith("notify_"):
             await self.handle_notification_update(query, data)
-        elif data.startswith("privacy_") or data.startswith("visibility_") or data.startswith("likes_") or data.startswith("unblock_") or data.startswith("confirm_privacy_") or data.startswith("cancel_privacy_"):
+        elif data.startswith("privacy_") or data.startswith("visibility_") or data.startswith("unblock_") or data.startswith("confirm_privacy_") or data.startswith("cancel_privacy_"):
             await self.handle_privacy_option(query, data)
+        elif data == "likes_history":
+            await self.show_likes_history(query)
+        elif data == "likes_new":
+            await self.show_likes_list(query, new_only=True)
+        elif data == "likes_all":
+            await self.show_likes_list(query, new_only=False)
+        elif data.startswith("likes_page_"):
+            page = int(data.replace("likes_page_", ""))
+            await self.show_likes_list(query, page=page)
+        elif data.startswith("reply_like_"):
+            liker_id = int(data.replace("reply_like_", ""))
+            await self.handle_like_response(query, liker_id, "reply")
+        elif data.startswith("skip_like_"):
+            liker_id = int(data.replace("skip_like_", ""))
+            await self.handle_like_response(query, liker_id, "skip")
+        elif data.startswith("view_profile_"):
+            profile_user_id = int(data.replace("view_profile_", ""))
+            await self.show_user_profile(query, profile_user_id)
     
     async def safe_edit_or_send_message(self, query, text: str, reply_markup=None, parse_mode='HTML'):
         """Безопасно редактирует сообщение или отправляет новое, если редактирование невозможно"""
@@ -1371,3 +1389,259 @@ class StartHandler:
         """Обрабатывает отмену изменений приватности"""
         await query.answer("❌ Изменения отменены")
         await self.show_privacy_menu(query)
+
+    # === ИСТОРИЯ ЛАЙКОВ ===
+
+    async def show_likes_history(self, query):
+        """Показывает главное меню истории лайков"""
+        await query.answer()
+        user_id = query.from_user.id
+        
+        try:
+            # Получаем статистику лайков
+            stats = await self.db.get_likes_statistics(user_id)
+            
+            menu_text = (
+                "💌 <b>История лайков</b>\n\n"
+                f"📊 <b>Статистика:</b>\n"
+                f"• Всего получено: {stats['total_received']}\n"
+                f"• Новых лайков: {stats['new_likes']}\n"
+                f"• Взаимных лайков: {stats['mutual_likes']}\n"
+                f"• Отправлено лайков: {stats['sent_likes']}\n\n"
+                "Выберите действие:"
+            )
+            
+            keyboard = Keyboards.likes_history_menu()
+            await self.safe_edit_or_send_message(query, menu_text, keyboard)
+            
+        except Exception as e:
+            logger.error(f"Ошибка отображения истории лайков для {user_id}: {e}")
+            await query.answer("❌ Произошла ошибка")
+            await self.show_main_menu(query)
+
+    async def show_likes_list(self, query, new_only: bool = False, page: int = 0):
+        """Показывает список полученных лайков"""
+        await query.answer()
+        user_id = query.from_user.id
+        
+        try:
+            # Параметры пагинации
+            limit = 5
+            offset = page * limit
+            
+            # Получаем лайки
+            likes = await self.db.get_received_likes(
+                user_id=user_id,
+                new_only=new_only,
+                limit=limit + 1,  # +1 чтобы понять есть ли следующая страница
+                offset=offset
+            )
+            
+            has_next = len(likes) > limit
+            if has_next:
+                likes = likes[:limit]  # Убираем лишний элемент
+            
+            if not likes:
+                if new_only:
+                    message_text = (
+                        "💌 <b>Новые лайки</b>\n\n"
+                        "📭 <b>У вас пока нет новых лайков</b>\n"
+                        "Новые лайки появятся здесь, когда кто-то поставит вам лайк!"
+                    )
+                else:
+                    message_text = (
+                        "💌 <b>Все лайки</b>\n\n"
+                        "📭 <b>У вас пока нет лайков</b>\n"
+                        "Лайки появятся здесь, когда другие игроки оценят ваш профиль!"
+                    )
+                
+                keyboard = Keyboards.likes_history_menu()
+                await self.safe_edit_or_send_message(query, message_text, keyboard)
+                return
+            
+            # Формируем сообщение со списком лайков с краткими строками
+            title = "💌 Новые лайки" if new_only else "📋 Все лайки"
+            message_text = f"{title}\n\n"
+            
+            # Строим клавиатуру с кнопками для каждого лайка
+            keyboard_rows = []
+            
+            for like in likes:
+                # Форматируем дату
+                created_at = like['created_at']
+                if isinstance(created_at, str):
+                    from datetime import datetime
+                    created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                
+                # Определяем статус и добавляем краткую строку в сообщение
+                status_emoji = "💫" if like['response_status'] == 'mutual' else "⏳"
+                message_text += f"{status_emoji} {like['game_nickname']} • {like['faceit_elo']} ELO • {like['role']} • {created_at.strftime('%d.%m')}\n"
+                
+                # Добавляем кнопки только для неотвеченных лайков
+                if like['response_status'] != 'mutual':
+                    # Row 1: Основная кнопка лайка
+                    keyboard_rows.append([
+                        InlineKeyboardButton(
+                            f"❤️ {like['game_nickname']} • {like['faceit_elo']} • {like['role']}",
+                            callback_data=f"reply_like_{like['liker_id']}"
+                        )
+                    ])
+                    
+                    # Row 2: Кнопки просмотра и пропуска
+                    keyboard_rows.append([
+                        InlineKeyboardButton("👁️", callback_data=f"view_profile_{like['liker_id']}"),
+                        InlineKeyboardButton("❌", callback_data=f"skip_like_{like['liker_id']}")
+                    ])
+            
+            # Добавляем навигацию внизу
+            has_prev = page > 0
+            navigation_keyboard = Keyboards.like_history_navigation(
+                has_prev=has_prev,
+                has_next=has_next,
+                page=page
+            )
+            
+            # Объединяем кнопки лайков с навигацией
+            if navigation_keyboard:
+                keyboard_rows.extend(navigation_keyboard.inline_keyboard)
+            
+            # Создаем финальную клавиатуру
+            final_keyboard = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
+            
+            await self.safe_edit_or_send_message(query, message_text, final_keyboard)
+            
+        except Exception as e:
+            logger.error(f"Ошибка отображения списка лайков для {user_id}: {e}")
+            await query.answer("❌ Произошла ошибка")
+            await self.show_likes_history(query)
+
+    async def handle_like_response(self, query, liker_id: int, action: str):
+        """Обрабатывает ответ на лайк"""
+        await query.answer()
+        user_id = query.from_user.id
+        
+        try:
+            if action == "reply":
+                # Ставим лайк в ответ
+                success = await self.db.add_like(user_id, liker_id)
+                
+                if success:
+                    # Проверяем взаимность
+                    is_mutual = await self.db.check_mutual_like(user_id, liker_id)
+                    
+                    if is_mutual:
+                        # Создаем матч
+                        match_success = await self.db.create_match(user_id, liker_id)
+                        
+                        if match_success:
+                            response_text = (
+                                "🎉 <b>Поздравляем!</b>\n\n"
+                                "У вас взаимный лайк! Теперь вы можете найти контакты друг друга "
+                                "в разделе 'Мои тиммейты'."
+                            )
+                            
+                            # Отправляем уведомления о новом матче (если настроено)
+                            try:
+                                from bot.utils.notifications import NotificationManager
+                                # Получаем бота из контекста
+                                bot = query.bot
+                                notification_manager = NotificationManager(bot, self.db)
+                                await notification_manager.send_match_notification(user_id, liker_id)
+                            except Exception as e:
+                                logger.error(f"Ошибка отправки уведомления о матче: {e}")
+                        else:
+                            response_text = "❤️ Лайк отправлен, но произошла ошибка создания матча"
+                    else:
+                        response_text = "❤️ Лайк отправлен! Если будет взаимность, вы узнаете об этом."
+                else:
+                    response_text = "❌ Не удалось отправить лайк. Попробуйте позже."
+                
+            elif action == "skip":
+                # Отмечаем лайк как просмотренный
+                success = await self.db.mark_like_as_viewed(liker_id, user_id)
+                
+                if success:
+                    response_text = "✅ Лайк пропущен"
+                else:
+                    response_text = "❌ Ошибка при обработке лайка"
+            
+            # Обновляем сообщение
+            await self.safe_edit_or_send_message(
+                query, 
+                response_text,
+                Keyboards.likes_history_menu()
+            )
+            
+        except Exception as e:
+            logger.error(f"Ошибка обработки ответа на лайк {liker_id} от {user_id}: {e}")
+            await query.answer("❌ Произошла ошибка")
+            await self.show_likes_history(query)
+
+    async def show_user_profile(self, query, profile_user_id: int):
+        """Показывает профиль другого пользователя"""
+        await query.answer()
+        current_user_id = query.from_user.id
+        
+        try:
+            # Получаем профиль
+            profile = await self.db.get_profile(profile_user_id)
+            
+            if not profile or profile.moderation_status != 'approved':
+                await query.answer("❌ Профиль недоступен")
+                return
+            
+            # Проверяем настройки приватности
+            user_settings = await self.db.get_user_settings(profile_user_id)
+            privacy_settings = user_settings.get_privacy_settings() if user_settings else {}
+            
+            visibility = privacy_settings.get('profile_visibility', 'all')
+            if visibility == 'hidden':
+                await query.answer("❌ Профиль скрыт")
+                return
+            elif visibility == 'matches_only':
+                # Проверяем есть ли взаимный лайк
+                is_match = await self.db.check_mutual_like(current_user_id, profile_user_id)
+                if not is_match:
+                    await query.answer("❌ Профиль доступен только тиммейтам")
+                    return
+            
+            # Формируем сообщение профиля
+            profile_text = f"👤 <b>Профиль игрока</b>\n\n"
+            profile_text += f"🎮 <b>{profile.game_nickname}</b>\n"
+            
+            if privacy_settings.get('show_elo', True):
+                profile_text += f"🎯 ELO Faceit: {profile.faceit_elo}\n"
+            
+            profile_text += f"👤 Роль: {profile.role}\n"
+            profile_text += f"🗺️ Карты: {', '.join(profile.favorite_maps[:3])}\n"
+            
+            if profile.description and len(profile.description.strip()) > 0:
+                profile_text += f"\n📝 <b>О себе:</b>\n{profile.description}\n"
+            
+            # Отправляем профиль
+            keyboard = Keyboards.likes_history_menu()
+            
+            if profile.media_type and profile.media_file_id:
+                if profile.media_type == 'photo':
+                    await query.message.reply_photo(
+                        photo=profile.media_file_id,
+                        caption=profile_text,
+                        reply_markup=keyboard,
+                        parse_mode='HTML'
+                    )
+                elif profile.media_type == 'video':
+                    await query.message.reply_video(
+                        video=profile.media_file_id,
+                        caption=profile_text,
+                        reply_markup=keyboard,
+                        parse_mode='HTML'
+                    )
+                else:
+                    await self.safe_edit_or_send_message(query, profile_text, keyboard)
+            else:
+                await self.safe_edit_or_send_message(query, profile_text, keyboard)
+                
+        except Exception as e:
+            logger.error(f"Ошибка отображения профиля {profile_user_id} для {current_user_id}: {e}")
+            await query.answer("❌ Произошла ошибка")
+            await self.show_likes_history(query)

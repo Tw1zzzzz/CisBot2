@@ -151,19 +151,126 @@ def format_faceit_display(elo: int, faceit_url: str) -> str:
     return f"{elo_display}\n🔗 [Faceit: {nickname}]({faceit_url})"
 
 def format_faceit_elo_display(current_elo: int, min_elo: int = None, max_elo: int = None, nickname: str = None) -> str:
-    """Форматирует отображение Faceit ELO с мин/макс значениями"""
+    """
+    Formats Faceit ELO display with min/max values and comprehensive validation.
+    
+    Validates input types and ranges, coerces to int ≥ 0, ensures logical consistency
+    (min ≤ current ≤ max), and falls back to base display when validation fails.
+    
+    Args:
+        current_elo: Current player ELO (required)
+        min_elo: Minimum player ELO (optional, including 0)  
+        max_elo: Maximum player ELO (optional, including 0)
+        nickname: Player nickname for contextual logging (optional)
+    
+    Returns:
+        str: Formatted ELO string with min/max values when valid
+    
+    Behavior Examples:
+        # Valid scenarios
+        >>> format_faceit_elo_display(2500)
+        "🔴 2500 ELO (Level 10)"
+        
+        >>> format_faceit_elo_display(2500, 2200, 2800)
+        "🔴 2500 ELO (Level 10) (мин:2200 макс:2800)"
+        
+        >>> format_faceit_elo_display(2500, min_elo=2200)
+        "🔴 2500 ELO (Level 10) (мин:2200)"
+        
+        >>> format_faceit_elo_display(1500, 0, 1600, "PlayerName")
+        "🟠 1500 ELO (Level 7) (мин:0 макс:1600)"
+        
+        # Validation and fallback scenarios
+        >>> format_faceit_elo_display("2500", "invalid", 2800)  # Type coercion
+        "🔴 2500 ELO (Level 10) (макс:2800)"
+        
+        >>> format_faceit_elo_display(2500, 2600, 2800)  # min > current, fallback
+        "🔴 2500 ELO (Level 10)"
+        
+        >>> format_faceit_elo_display(2500, 2200, 2400)  # current > max, fallback  
+        "🔴 2500 ELO (Level 10)"
+        
+        >>> format_faceit_elo_display(-100)  # Negative coerced to 0
+        "🟫 0 ELO (Level 1)"
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    player_context = f" (player: {nickname})" if nickname else ""
+    
+    # Helper function to coerce and validate ELO values
+    def coerce_elo_value(value, value_name: str):
+        if value is None:
+            return None
+            
+        if not isinstance(value, (int, float, str)):
+            logger.warning(f"format_faceit_elo_display: {value_name} invalid type: {type(value)} = {value}{player_context}")
+            return None
+            
+        try:
+            # Try to convert to int
+            if isinstance(value, str):
+                # Handle string numeric values
+                coerced = int(float(value))  # float first to handle "2500.0"
+            else:
+                coerced = int(value)
+            
+            # Ensure >= 0
+            if coerced < 0:
+                logger.warning(f"format_faceit_elo_display: {value_name} negative, coercing to 0: {coerced}{player_context}")
+                coerced = 0
+                
+            return coerced
+            
+        except (ValueError, TypeError, OverflowError):
+            logger.warning(f"format_faceit_elo_display: {value_name} cannot be coerced to int: {value}{player_context}")
+            return None
+    
+    # Validate and coerce current_elo (required parameter)
+    current_elo = coerce_elo_value(current_elo, "current_elo")
+    if current_elo is None:
+        logger.error(f"format_faceit_elo_display: current_elo is invalid, using 0{player_context}")
+        current_elo = 0
+    
+    # Validate and coerce optional min/max values
+    min_elo = coerce_elo_value(min_elo, "min_elo") if min_elo is not None else None
+    max_elo = coerce_elo_value(max_elo, "max_elo") if max_elo is not None else None
+    
+    # Check logical consistency: min <= current <= max
+    should_show_minmax = True
+    validation_errors = []
+    
+    if min_elo is not None and current_elo < min_elo:
+        validation_errors.append(f"current_elo({current_elo}) < min_elo({min_elo})")
+        should_show_minmax = False
+        
+    if max_elo is not None and current_elo > max_elo:
+        validation_errors.append(f"current_elo({current_elo}) > max_elo({max_elo})")
+        should_show_minmax = False
+        
+    if min_elo is not None and max_elo is not None and min_elo > max_elo:
+        validation_errors.append(f"min_elo({min_elo}) > max_elo({max_elo})")
+        should_show_minmax = False
+    
+    if validation_errors:
+        logger.warning(f"format_faceit_elo_display: Logical inconsistencies detected, falling back to base display: {'; '.join(validation_errors)}{player_context}")
+    
+    # Generate base display
     base_display = format_elo_display(current_elo)
     
-    # Показываем мин/макс значения если они переданы (включая 0 - это тоже валидная статистика)
-    elo_parts = []
-    if min_elo is not None:
-        elo_parts.append(f"мин:{min_elo}")
-    if max_elo is not None:
-        elo_parts.append(f"макс:{max_elo}")
-    
-    # Добавляем дополнительную информацию если есть
-    if elo_parts:
-        base_display += f" ({' '.join(elo_parts)})"
+    # Add min/max information only if logically consistent and values are valid
+    if should_show_minmax and (min_elo is not None or max_elo is not None):
+        elo_parts = []
+        if min_elo is not None:
+            elo_parts.append(f"мин:{min_elo}")
+        if max_elo is not None:
+            elo_parts.append(f"макс:{max_elo}")
+        
+        if elo_parts:
+            base_display += f" ({' '.join(elo_parts)})"
+            logger.debug(f"format_faceit_elo_display: Display with min/max{player_context}: {base_display}")
+    else:
+        logger.debug(f"format_faceit_elo_display: Base display{player_context}: {base_display}")
     
     return base_display
 
