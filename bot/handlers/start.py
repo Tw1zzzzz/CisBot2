@@ -223,6 +223,7 @@ class StartHandler:
             await self.handle_like_response(query, liker_id, "skip")
         elif data.startswith("view_profile_"):
             profile_user_id = int(data.replace("view_profile_", ""))
+            logger.info(f"StartHandler: Processing view_profile_ callback for user {profile_user_id} from user {query.from_user.id}")
             await self.show_user_profile(query, profile_user_id)
     
     async def safe_edit_or_send_message(self, query, text: str, reply_markup=None, parse_mode='HTML'):
@@ -1582,26 +1583,36 @@ class StartHandler:
         await query.answer()
         current_user_id = query.from_user.id
         
+        logger.info(f"show_user_profile: current_user_id={current_user_id}, profile_user_id={profile_user_id}")
+        
         try:
             # Получаем профиль
             profile = await self.db.get_profile(profile_user_id)
+            logger.info(f"show_user_profile: profile found={profile is not None}, status={profile.moderation_status if profile else 'None'}")
             
             if not profile or profile.moderation_status != 'approved':
+                logger.warning(f"show_user_profile: Profile not available for user {profile_user_id}")
                 await query.answer("❌ Профиль недоступен")
                 return
             
             # Проверяем настройки приватности
             user_settings = await self.db.get_user_settings(profile_user_id)
-            privacy_settings = user_settings.get_privacy_settings() if user_settings else {}
+            privacy_settings = user_settings.privacy_settings if user_settings and user_settings.privacy_settings else {}
+            logger.info(f"show_user_profile: privacy_settings={privacy_settings}")
             
             visibility = privacy_settings.get('profile_visibility', 'all')
+            logger.info(f"show_user_profile: visibility={visibility}")
+            
             if visibility == 'hidden':
+                logger.info(f"show_user_profile: Profile {profile_user_id} is hidden")
                 await query.answer("❌ Профиль скрыт")
                 return
             elif visibility == 'matches_only':
                 # Проверяем есть ли взаимный лайк
                 is_match = await self.db.check_mutual_like(current_user_id, profile_user_id)
+                logger.info(f"show_user_profile: is_match={is_match}")
                 if not is_match:
+                    logger.info(f"show_user_profile: Profile {profile_user_id} requires match for user {current_user_id}")
                     await query.answer("❌ Профиль доступен только тиммейтам")
                     return
             
@@ -1620,6 +1631,7 @@ class StartHandler:
             
             # Отправляем профиль
             keyboard = Keyboards.likes_history_menu()
+            logger.info(f"show_user_profile: Sending profile for {profile_user_id}, has_media={profile.media_type is not None}")
             
             if profile.media_type and profile.media_file_id:
                 if profile.media_type == 'photo':
@@ -1629,6 +1641,7 @@ class StartHandler:
                         reply_markup=keyboard,
                         parse_mode='HTML'
                     )
+                    logger.info(f"show_user_profile: Photo sent for profile {profile_user_id}")
                 elif profile.media_type == 'video':
                     await query.message.reply_video(
                         video=profile.media_file_id,
@@ -1636,10 +1649,13 @@ class StartHandler:
                         reply_markup=keyboard,
                         parse_mode='HTML'
                     )
+                    logger.info(f"show_user_profile: Video sent for profile {profile_user_id}")
                 else:
                     await self.safe_edit_or_send_message(query, profile_text, keyboard)
+                    logger.info(f"show_user_profile: Text message sent for profile {profile_user_id}")
             else:
                 await self.safe_edit_or_send_message(query, profile_text, keyboard)
+                logger.info(f"show_user_profile: Text message sent for profile {profile_user_id} (no media)")
                 
         except Exception as e:
             logger.error(f"Ошибка отображения профиля {profile_user_id} для {current_user_id}: {e}")

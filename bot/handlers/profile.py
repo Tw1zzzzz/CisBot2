@@ -12,6 +12,7 @@ from bot.utils.cs2_data import (
     validate_faceit_url, format_elo_display, format_faceit_display
 )
 from bot.utils.faceit_analyzer import faceit_analyzer
+from bot.utils.notifications import NotificationManager
 from bot.database.operations import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -1199,6 +1200,15 @@ class ProfileHandler:
             # Проверяем, что профиль действительно сохранился
             has_profile_check = await self.db.has_profile(user_id)
             logger.info(f"save_profile: Проверка has_profile после создания: {has_profile_check}")
+            
+            # Отправляем уведомление модераторам о новой анкете
+            try:
+                notification_manager = NotificationManager(context.bot, self.db)
+                notification_success = await notification_manager.send_moderator_notification(profile_data)
+                logger.info(f"save_profile: Результат отправки уведомлений модераторам: {notification_success}")
+            except Exception as e:
+                logger.error(f"save_profile: Ошибка отправки уведомлений модераторам: {e}")
+                # Не блокируем основной процесс - профиль уже создан
             
             # Очищаем временные данные
             cleanup_keys = ['creating_profile', 'selecting_media_type']

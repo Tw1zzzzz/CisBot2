@@ -265,3 +265,71 @@ class NotificationManager:
         
         if expired_keys:
             logger.info(f"Очищено {len(expired_keys)} устаревших записей из кэша уведомлений")
+    
+    async def send_moderator_notification(self, profile_data: dict) -> bool:
+        """
+        Отправляет уведомление модераторам о новой анкете на модерацию
+        
+        Args:
+            profile_data: Данные созданного профиля
+            
+        Returns:
+            bool: True если уведомления отправлены успешно
+        """
+        try:
+            # Получаем список всех модераторов
+            moderators = await self.db.get_all_moderators()
+            if not moderators:
+                logger.warning("Не найдено активных модераторов для уведомления")
+                return False
+            
+            # Фильтруем только активных модераторов с правами модерации
+            active_moderators = [
+                mod for mod in moderators 
+                if mod.is_active and mod.can_moderate_profiles()
+            ]
+            
+            if not active_moderators:
+                logger.warning("Не найдено активных модераторов с правами модерации профилей")
+                return False
+            
+            # Формируем сообщение с информацией об анкете
+            message = (
+                f"🔔 <b>Новая анкета на модерацию</b>\n\n"
+                f"👤 <b>Никнейм:</b> {profile_data.get('game_nickname', 'Не указан')}\n"
+                f"🎯 <b>ELO:</b> {profile_data.get('faceit_elo', 'Не указан')}\n"
+                f"🎮 <b>Роль:</b> {profile_data.get('role', 'Не указана')}\n"
+                f"🗺️ <b>Карты:</b> {', '.join(profile_data.get('maps', [])[:3])}\n\n"
+                f"⏰ Требуется проверка в течение 24 часов"
+            )
+            
+            # Создаем кнопку для быстрого перехода к модерации
+            keyboard = [[
+                InlineKeyboardButton("🔍 Модерировать", callback_data="mod_queue")
+            ]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Отправляем уведомления всем активным модераторам
+            success_count = 0
+            for moderator in active_moderators:
+                try:
+                    await self.bot.send_message(
+                        chat_id=moderator.user_id,
+                        text=message,
+                        parse_mode='HTML',
+                        reply_markup=reply_markup
+                    )
+                    success_count += 1
+                    logger.info(f"Уведомление о новой анкете отправлено модератору {moderator.user_id}")
+                    
+                except TelegramError as e:
+                    logger.error(f"Ошибка отправки уведомления модератору {moderator.user_id}: {e}")
+                except Exception as e:
+                    logger.error(f"Неожиданная ошибка при отправке уведомления модератору {moderator.user_id}: {e}")
+            
+            logger.info(f"Уведомления о новой анкете отправлены: {success_count}/{len(active_moderators)} модераторам")
+            return success_count > 0
+            
+        except Exception as e:
+            logger.error(f"Критическая ошибка при отправке уведомлений модераторам: {e}")
+            return False
