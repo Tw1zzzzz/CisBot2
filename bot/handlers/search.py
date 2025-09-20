@@ -2,12 +2,15 @@
 Обработчики поиска тиммейтов
 """
 import logging
+import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 from bot.utils.keyboards import Keyboards
 from bot.utils.notifications import NotificationManager
 from bot.utils.cs2_data import format_elo_display, format_role_display, format_maps_list, calculate_profile_compatibility, extract_faceit_nickname, PLAYTIME_OPTIONS
 from bot.utils.faceit_analyzer import faceit_analyzer
+from bot.utils.background_processor import TaskPriority
+from bot.utils.progressive_loader import get_progressive_loader
 from bot.database.operations import DatabaseManager
 
 logger = logging.getLogger(__name__)
@@ -180,6 +183,12 @@ class SearchHandler:
             current_index = context.user_data.get('current_candidate_index', 0)
             user_id = query_or_update.from_user.id if hasattr(query_or_update, 'from_user') else query_or_update.effective_user.id
             
+            # Cancel pending ELO updates when navigating to next candidate
+            progressive_loader = get_progressive_loader()
+            if progressive_loader:
+                await progressive_loader.cancel_pending_updates(user_id)
+                logger.debug(f"Cancelled pending ELO updates for user {user_id} before showing candidate")
+            
             logger.info(f"show_candidate: user_id={user_id}, index={current_index}, total_candidates={len(candidates)}")
             
             if current_index >= len(candidates):
@@ -268,11 +277,11 @@ class SearchHandler:
                 logger.error(f"Ошибка получения профиля пользователя {user_id}: {profile_error}")
                 user_profile = None
             
-            # 🔥 ЛОГИРОВАНИЕ: Начало форматирования анкеты
-            logger.debug(f"Начинаем форматирование анкеты кандидата {candidate_id}")
+            # Progressive loading: Format basic profile first (without ELO API calls)
+            logger.debug(f"Начинаем форматирование базовой анкеты кандидата {candidate_id}")
             try:
-                text = await self.format_candidate_profile(candidate, user_profile, user_id)
-                logger.debug(f"Анкета кандидата {candidate_id} сформатирована, длина: {len(text)} символов")
+                text = await self.format_candidate_profile_basic(candidate, user_profile, user_id)
+                logger.debug(f"Базовая анкета кандидата {candidate_id} сформатирована, длина: {len(text)} символов")
             except Exception as format_error:
                 logger.error(f"Ошибка форматирования анкеты кандидата {candidate_id}: {format_error}")
                 text = f"❌ <b>Ошибка отображения анкеты</b>\n\nКандидат: {candidate_id}"
@@ -301,11 +310,12 @@ class SearchHandler:
             # Отправляем профиль с медиа если есть
             query_for_edit = query_or_update if hasattr(query_or_update, 'edit_message_text') else None
             
-            # 🔥 ЛОГИРОВАНИЕ: Начало отправки
-            logger.info(f"Отправляем анкету кандидата {candidate_id} пользователю {user_id} (chat_id={chat_id}, has_media={has_media})")
+            # Progressive loading: Send basic profile immediately and schedule ELO update
+            logger.info(f"Отправляем базовую анкету кандидата {candidate_id} пользователю {user_id} (chat_id={chat_id}, has_media={has_media})")
             
             try:
-                await self.send_candidate_with_media(
+                # Send basic profile first
+                message_info = await self.send_candidate_with_media(
                     chat_id=chat_id,
                     candidate=candidate,
                     text=text,
@@ -313,7 +323,48 @@ class SearchHandler:
                     context=context,
                     query_for_edit=query_for_edit
                 )
-                logger.info(f"Анкета кандидата {candidate_id} успешно отправлена пользователю {user_id}")
+                logger.info(f"Базовая анкета кандидата {candidate_id} успешно отправлена пользователю {user_id}")
+                
+                # Progressive loading: Register message and schedule ELO update
+                if message_info and len(message_info) >= 4:
+                    chat_id_msg, message_id, is_media, is_photo = message_info
+                    
+                    # Only register progressive updates if message was sent successfully
+                    if message_id > 0:
+                        # Get progressive loader
+                        progressive_loader = get_progressive_loader()
+                        if progressive_loader:
+                            # Generate context ID to prevent race conditions
+                            import uuid
+                            context_id = f"search_{user_id}_{candidate_id}_{uuid.uuid4().hex[:8]}"
+                            
+                            # Set user context
+                            await progressive_loader.set_user_context(user_id, context_id)
+                            
+                            # Register message for ELO updates
+                            message_key = progressive_loader.register_message(
+                                chat_id_msg, message_id, is_media, is_photo,
+                                user_id, 'search', context_id
+                            )
+                            
+                            # Schedule ELO update in background if candidate has faceit nickname
+                            game_nickname = getattr(candidate, 'game_nickname', '')
+                            if game_nickname and game_nickname.strip():
+                                logger.debug(f"Scheduling ELO update for candidate {candidate_id} with nickname {game_nickname}")
+                                
+                                # Create faceit data for the update
+                                faceit_data = {
+                                    'faceit_nickname': game_nickname,
+                                    'faceit_elo': getattr(candidate, 'faceit_elo', 0)
+                                }
+                                
+                                # Schedule the ELO update
+                                await self._schedule_candidate_elo_update(
+                                    message_key, candidate, faceit_data, user_profile, user_id
+                                )
+                            else:
+                                logger.debug(f"No faceit nickname for candidate {candidate_id}, skipping ELO update")
+                
             except Exception as send_error:
                 logger.error(f"Критическая ошибка отправки анкеты кандидата {candidate_id} пользователю {user_id}: {send_error}", exc_info=True)
                 # Попытка отправить простое уведомление об ошибке
@@ -335,7 +386,7 @@ class SearchHandler:
                 pass
             logger.error(f"Критическая ошибка в show_candidate для пользователя {user_id_safe}: {e}", exc_info=True)
 
-    async def format_candidate_profile(self, candidate, user_profile=None, current_user_id=None):
+    async def format_candidate_profile_basic(self, candidate, user_profile=None, current_user_id=None):
         """Форматирует анкету кандидата"""
         try:
             # 🔥 ИСПРАВЛЕНИЕ: Безопасная проверка взаимного лайка
@@ -369,64 +420,16 @@ class SearchHandler:
             
             text += "\n"
             
-            # 🔥 ИСПРАВЛЕНИЕ: Безопасное отображение ELO с мин/макс значениями
+            # Progressive loading: Show ELO loading placeholder immediately
             try:
                 faceit_elo = getattr(candidate, 'faceit_elo', 0)
-                game_nickname = getattr(candidate, 'game_nickname', '')
                 
                 if not isinstance(faceit_elo, int) or faceit_elo < 0:
                     faceit_elo = 0  # По умолчанию
                 
                 if faceit_elo > 0:
-                    # Получаем ELO статистику через Faceit API
-                    elo_stats = None
-                    try:
-                        if game_nickname and game_nickname.strip():
-                            from bot.utils.faceit_analyzer import faceit_analyzer
-                            elo_stats = await faceit_analyzer.get_elo_stats_by_nickname(game_nickname)
-                    except Exception as api_error:
-                        logger.debug(f"Не удалось получить ELO статистику для {game_nickname}: {api_error}")
-                    
-                    # Отображаем ELO с мин/макс значениями если есть данные (ИСПРАВЛЕННАЯ ЛОГИКА SEARCH)
-                    if elo_stats:
-                        from bot.utils.cs2_data import format_faceit_elo_display
-                        import time
-                        
-                        # Диагностика производительности API
-                        api_start_time = time.time()
-                        
-                        # Валидируем что lowest_elo и highest_elo являются числами
-                        lowest_elo = elo_stats.get('lowest_elo', 0)
-                        highest_elo = elo_stats.get('highest_elo', 0)
-                        
-                        # Дополнительная валидация ELO данных для поиска
-                        try:
-                            if isinstance(lowest_elo, (int, float)) and isinstance(highest_elo, (int, float)):
-                                # Проверяем логическую корректность (min <= current <= max)
-                                lowest_elo = int(lowest_elo) if lowest_elo >= 0 else 0
-                                highest_elo = int(highest_elo) if highest_elo >= 0 else 0
-                                
-                                # Логируем производительность API
-                                api_time = round((time.time() - api_start_time) * 1000, 2)
-                                
-                                # Показываем мин/макс даже если API вернул ошибку, но есть валидные данные
-                                if lowest_elo > 0 or highest_elo > 0:
-                                    logger.info(f"🔥 SEARCH: Показываем ELO с мин/макс для {game_nickname}: мин={lowest_elo} макс={highest_elo} (API: {api_time}ms)")
-                                    text += f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(faceit_elo, lowest_elo, highest_elo, game_nickname)}\n"
-                                else:
-                                    # Если мин/макс равны 0, показываем только текущий ELO
-                                    text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(faceit_elo)}\n"
-                            else:
-                                logger.warning(f"⚠️ SEARCH: ELO значения некорректного типа для {game_nickname}: lowest={type(lowest_elo)}, highest={type(highest_elo)}")
-                                # Fallback при некорректных типах данных
-                                text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(faceit_elo)}\n"
-                        except Exception as elo_validation_error:
-                            logger.error(f"Ошибка валидации ELO в поиске для {game_nickname}: {elo_validation_error}")
-                            # Fallback при ошибке валидации  
-                            text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(faceit_elo)}\n"
-                    else:
-                        # Fallback на базовое отображение ELO
-                        text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(faceit_elo)}\n"
+                    # Show loading placeholder for immediate display
+                    text += f"🎯 <b>ELO Faceit:</b> {Keyboards.elo_loading_placeholder()}\n"
                 else:
                     text += f"🎯 <b>ELO Faceit:</b> Не указан\n"
             except Exception as elo_error:
@@ -565,8 +568,83 @@ class SearchHandler:
                 logger.error(f"Критическая ошибка создания fallback профиля для кандидата {candidate.user_id}: {fallback_error}")
                 return f"❌ <b>Ошибка отображения анкеты</b>\n\nИдентификатор: {candidate.user_id if hasattr(candidate, 'user_id') else 'неизвестен'}"
 
+    async def format_candidate_profile_with_elo(self, candidate, elo_data, user_profile=None, current_user_id=None):
+        """Форматирует анкету кандидата с ELO данными (для прогрессивного обновления)"""
+        try:
+            # Get basic profile text
+            text = await self.format_candidate_profile_basic(candidate, user_profile, current_user_id)
+            
+            # Replace ELO loading placeholder with actual data
+            if elo_data:
+                from bot.utils.cs2_data import format_faceit_elo_display
+                
+                faceit_elo = getattr(candidate, 'faceit_elo', 0)
+                game_nickname = getattr(candidate, 'game_nickname', '')
+                
+                # Get min/max ELO from API data
+                lowest_elo = elo_data.get('lowest_elo', 0)
+                highest_elo = elo_data.get('highest_elo', 0)
+                
+                # Validate ELO data
+                if isinstance(lowest_elo, (int, float)) and isinstance(highest_elo, (int, float)):
+                    lowest_elo = int(lowest_elo) if lowest_elo >= 0 else 0
+                    highest_elo = int(highest_elo) if highest_elo >= 0 else 0
+                    
+                    # Format ELO display with min/max if available
+                    if lowest_elo > 0 or highest_elo > 0:
+                        elo_display = format_faceit_elo_display(faceit_elo, lowest_elo, highest_elo, game_nickname)
+                        logger.debug(f"ELO updated for {game_nickname}: {faceit_elo} (min: {lowest_elo}, max: {highest_elo})")
+                    else:
+                        elo_display = format_elo_display(faceit_elo)
+                else:
+                    elo_display = format_elo_display(faceit_elo)
+                
+                # Replace loading placeholder with actual ELO
+                loading_placeholder = Keyboards.elo_loading_placeholder()
+                text = text.replace(loading_placeholder, elo_display)
+            
+            return text
+            
+        except Exception as e:
+            logger.error(f"Error formatting candidate profile with ELO for {candidate.user_id}: {e}", exc_info=True)
+            # Return basic profile text as fallback
+            return await self.format_candidate_profile_basic(candidate, user_profile, current_user_id)
+
+    async def _schedule_candidate_elo_update(self, message_key: str, candidate, faceit_data: dict, user_profile, user_id: int) -> None:
+        """Schedule ELO update for a candidate profile"""
+        try:
+            progressive_loader = get_progressive_loader()
+            if not progressive_loader:
+                logger.warning("Progressive loader not available for ELO update")
+                return
+                
+            # Create format callback for ELO updates
+            async def format_callback(updated_faceit_data, include_elo=True):
+                if include_elo:
+                    formatted_text = await self.format_candidate_profile_with_elo(
+                        candidate, updated_faceit_data, user_profile, user_id
+                    )
+                else:
+                    formatted_text = await self.format_candidate_profile_basic(
+                        candidate, user_profile, user_id
+                    )
+                return formatted_text, Keyboards.like_buttons()
+            
+            # Schedule the ELO update with HIGH priority for search results
+            success = await progressive_loader.schedule_elo_update(
+                message_key, faceit_data, format_callback, TaskPriority.HIGH
+            )
+            
+            if success:
+                logger.debug(f"ELO update scheduled for candidate {candidate.user_id}")
+            else:
+                logger.warning(f"Failed to schedule ELO update for candidate {candidate.user_id}")
+                
+        except Exception as e:
+            logger.error(f"Error scheduling ELO update for candidate {candidate.user_id}: {e}", exc_info=True)
+
     async def send_candidate_with_media(self, chat_id: int, candidate, text: str, reply_markup=None, context=None, query_for_edit=None):
-        """Отправляет профиль кандидата с медиа"""
+        """Отправляет профиль кандидата с медиа и возвращает информацию о сообщении"""
         try:
             # 🔥 ИСПРАВЛЕНИЕ: Проверяем длину caption для медиа (лимит Telegram = 1024 символа)  
             if candidate.has_media():
@@ -578,9 +656,10 @@ class SearchHandler:
                 
                 # Отправляем медиа с caption
                 media_sent = False
+                sent_message = None
                 if candidate.is_photo():
                     try:
-                        await context.bot.send_photo(
+                        sent_message = await context.bot.send_photo(
                             chat_id=chat_id,
                             photo=candidate.media_file_id,
                             caption=media_caption,
@@ -599,7 +678,7 @@ class SearchHandler:
                         
                 elif candidate.is_video():
                     try:
-                        await context.bot.send_video(
+                        sent_message = await context.bot.send_video(
                             chat_id=chat_id,
                             video=candidate.media_file_id,
                             caption=media_caption,
@@ -619,7 +698,7 @@ class SearchHandler:
                 # Если медиа не удалось отправить, отправляем как обычное текстовое сообщение
                 if not media_sent:
                     logger.warning(f"Медиа не отправлено, отправляем текстом для кандидата {candidate.user_id}")
-                    await context.bot.send_message(
+                    sent_message = await context.bot.send_message(
                         chat_id=chat_id,
                         text=text,
                         parse_mode='HTML',
@@ -638,6 +717,10 @@ class SearchHandler:
                         # НЕ критичная ошибка - продолжаем работу
                         logger.warning(f"Не удалось удалить предыдущее сообщение для кандидата {candidate.user_id}: {delete_error}")
                         
+                # Return message info for media messages
+                if sent_message:
+                    return (sent_message.chat_id, sent_message.message_id, True, candidate.is_photo())
+                        
             else:
                 # 🔥 ИСПРАВЛЕНИЕ: Улучшенная обработка кандидатов без медиа
                 logger.debug(f"Отправка текстового профиля для кандидата {candidate.user_id}")
@@ -651,19 +734,23 @@ class SearchHandler:
                             reply_markup=reply_markup
                         )
                         logger.debug(f"Сообщение отредактировано для кандидата {candidate.user_id}")
-                        return  # Успешно отредактировали
+                        # Return message info for edited message
+                        return (query_for_edit.message.chat_id, query_for_edit.message.message_id, False, False)
                     except Exception as edit_error:
                         logger.warning(f"Не удалось редактировать сообщение для кандидата {candidate.user_id}: {edit_error}")
                         # Продолжаем к отправке нового сообщения
                 
                 # Отправляем новое текстовое сообщение
-                await context.bot.send_message(
+                sent_message = await context.bot.send_message(
                     chat_id=chat_id,
                     text=text,
                     parse_mode='HTML',
                     reply_markup=reply_markup
                 )
                 logger.debug(f"Новое текстовое сообщение отправлено для кандидата {candidate.user_id}")
+                
+                # Return message info for new text message
+                return (sent_message.chat_id, sent_message.message_id, False, False)
                 
         except Exception as e:
             logger.error(f"Критическая ошибка отправки профиля кандидата {candidate.user_id}: {e}", exc_info=True)
@@ -673,25 +760,41 @@ class SearchHandler:
                 # Убеждаемся что текст не пустой и не слишком длинный
                 fallback_text = text[:4000] if text and len(text) > 4000 else (text or "❌ Ошибка загрузки профиля")
                 
-                await context.bot.send_message(
+                sent_message = await context.bot.send_message(
                     chat_id=chat_id,
                     text=f"⚠️ <b>Профиль кандидата</b>\n\n{fallback_text}\n\n<i>Примечание: возникла ошибка при загрузке полной версии профиля.</i>",
                     parse_mode='HTML',
                     reply_markup=reply_markup
                 )
                 logger.info(f"Fallback сообщение отправлено для кандидата {candidate.user_id}")
+                
+                # Return message info for fallback message
+                return (sent_message.chat_id, sent_message.message_id, False, False)
+                
             except Exception as fallback_error:
                 logger.error(f"Критическая ошибка fallback отправки для кандидата {candidate.user_id}: {fallback_error}", exc_info=True)
                 # В крайнем случае отправляем простое сообщение об ошибке
                 try:
-                    await context.bot.send_message(
+                    sent_message = await context.bot.send_message(
                         chat_id=chat_id,
                         text="❌ <b>Ошибка отображения анкеты</b>\n\nПопробуйте обновить поиск или обратитесь в поддержку.",
                         parse_mode='HTML',
                         reply_markup=reply_markup
                     )
+                    # Return message info even for error messages
+                    if sent_message:
+                        return (sent_message.chat_id, sent_message.message_id, False, False)
                 except:
                     pass  # Не можем даже отправить ошибку
+                    
+        # Return message info if we have a sent message
+        if 'sent_message' in locals() and sent_message:
+            is_media = bool(candidate.has_media() and media_sent)
+            is_photo = bool(candidate.is_photo() and media_sent)
+            return (sent_message.chat_id, sent_message.message_id, is_media, is_photo)
+        
+        # Fallback return if no message was sent successfully  
+        return (chat_id, 0, False, False)
 
     async def handle_like(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обрабатывает лайк"""
@@ -882,6 +985,13 @@ class SearchHandler:
             context.user_data['current_candidate_index'] = current_index + 1
             
             user_id = query.from_user.id if hasattr(query, 'from_user') else "неизвестен"
+            
+            # Cancel pending ELO updates before navigating to next candidate
+            progressive_loader = get_progressive_loader()
+            if progressive_loader and hasattr(query, 'from_user'):
+                await progressive_loader.cancel_pending_updates(query.from_user.id)
+                logger.debug(f"Cancelled pending ELO updates for user {query.from_user.id} before next candidate")
+            
             logger.debug(f"Переход к кандидату #{current_index + 1} для пользователя {user_id}")
             
             await self.show_candidate(query, context)

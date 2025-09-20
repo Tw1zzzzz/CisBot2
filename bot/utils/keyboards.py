@@ -257,15 +257,47 @@ class Keyboards:
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def like_buttons():
+    def like_buttons(loading: bool = False):
+        """Like buttons with optional loading state support"""
+        if loading:
+            keyboard = [
+                [
+                    InlineKeyboardButton("⏳ Загружается...", callback_data="loading"),
+                    InlineKeyboardButton("❌ Пропустить", callback_data="skip")
+                ],
+                [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+            ]
+        else:
+            keyboard = [
+                [
+                    InlineKeyboardButton("❤️ Лайк", callback_data="like"),
+                    InlineKeyboardButton("❌ Пропустить", callback_data="skip")
+                ],
+                [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
+            ]
+        return InlineKeyboardMarkup(keyboard)
+
+    @staticmethod
+    def like_buttons_loading():
+        """Like buttons with loading indicators for ELO fetch"""
         keyboard = [
             [
-                InlineKeyboardButton("❤️ Лайк", callback_data="like"),
+                InlineKeyboardButton("⏳ Загружается ELO...", callback_data="loading"),
                 InlineKeyboardButton("❌ Пропустить", callback_data="skip")
             ],
             [InlineKeyboardButton("🔙 В главное меню", callback_data="back_to_main")]
         ]
         return InlineKeyboardMarkup(keyboard)
+
+    @staticmethod
+    def loading_indicator_text():
+        """Returns consistent loading text for UI"""
+        return "⏳ Загружается..."
+
+    @staticmethod
+    def elo_loading_placeholder():
+        """Returns ELO-specific loading placeholder text"""
+        return "⏳ загружается..."
 
     @staticmethod
     def profile_edit_menu():

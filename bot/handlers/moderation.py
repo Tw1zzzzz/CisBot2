@@ -3,10 +3,12 @@
 Создано организацией Twizz_Project
 """
 import logging
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from bot.database.operations import DatabaseManager
 from bot.utils.cs2_data import format_elo_display, format_role_display, extract_faceit_nickname, PLAYTIME_OPTIONS
+from bot.utils.background_processor import TaskPriority
 
 logger = logging.getLogger(__name__)
 
@@ -119,15 +121,28 @@ class ModerationHandler:
         
         text += f"🎮 <b>Игровой ник:</b> {profile_data['game_nickname']}\n"
         
-        # Получаем ELO статистику через Faceit API
+        # Получаем ELO статистику через Background Processor (HIGH priority для moderation)
         elo_stats = None
         try:
             if profile_data['game_nickname'] and profile_data['game_nickname'].strip():
                 from bot.utils.faceit_analyzer import faceit_analyzer
-                import asyncio
-                elo_stats = await faceit_analyzer.get_elo_stats_by_nickname(profile_data['game_nickname'])
+                # Use HIGH priority for moderation requests since moderators are actively reviewing
+                elo_future = await faceit_analyzer.get_elo_stats_by_nickname_priority(profile_data['game_nickname'], TaskPriority.HIGH)
+                
+                try:
+                    # Wait for result with timeout (don't make moderators wait too long)
+                    elo_stats = await asyncio.wait_for(elo_future, timeout=7.0)
+                    logger.debug(f"✅ Получена ELO статистика для модерации {profile_data['game_nickname']}")
+                except asyncio.TimeoutError:
+                    logger.warning(f"⏰ Таймаут получения ELO для модерации {profile_data['game_nickname']}")
+                    elo_stats = None
         except Exception as e:
-            logger.debug(f"Не удалось получить ELO статистику для {profile_data['game_nickname']}: {e}")
+            logger.debug(f"❌ Ошибка фонового процессора для модерации {profile_data['game_nickname']}: {e}")
+            # Fallback to direct call if background processor fails
+            try:
+                elo_stats = await faceit_analyzer.get_elo_stats_by_nickname(profile_data['game_nickname'])
+            except Exception:
+                elo_stats = None
         
         # Отображаем ELO с мин/макс значениями если есть данные (ИСПРАВЛЕННАЯ ЛОГИКА МОДЕРАЦИЯ)
         if elo_stats:

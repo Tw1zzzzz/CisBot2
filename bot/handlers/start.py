@@ -3,6 +3,7 @@
 """
 import logging
 import json
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from bot.utils.keyboards import Keyboards
@@ -258,6 +259,9 @@ class StartHandler:
         await query.answer()
         
         user_id = query.from_user.id
+        
+        # Прогреваем сеть пользователя для быстрой загрузки ELO данных
+        await self._warm_user_network(user_id)
         
         # Проверяем статус профиля пользователя
         has_any_profile = await self.db.has_profile(user_id)
@@ -1527,6 +1531,20 @@ class StartHandler:
                 success = await self.db.add_like(user_id, liker_id)
                 
                 if success:
+                    # Отправляем уведомление о лайке первому игроку
+                    try:
+                        from bot.utils.notifications import NotificationManager
+                        bot = query.bot
+                        notification_manager = NotificationManager(bot, self.db)
+                        await notification_manager.send_like_notification(
+                            liked_user_id=liker_id,  # Тот, кто получит уведомление (первый игрок)
+                            liker_user_id=user_id    # Тот, кто поставил лайк (второй игрок)
+                        )
+                        logger.info(f"Уведомление о лайке отправлено {liker_id} от {user_id}")
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки уведомления о лайке: {e}")
+                
+                if success:
                     # Проверяем взаимность
                     is_mutual = await self.db.check_mutual_like(user_id, liker_id)
                     
@@ -1661,3 +1679,26 @@ class StartHandler:
             logger.error(f"Ошибка отображения профиля {profile_user_id} для {current_user_id}: {e}")
             await query.answer("❌ Произошла ошибка")
             await self.show_likes_history(query)
+    
+    async def _warm_user_network(self, user_id: int):
+        """Прогревает сеть пользователя для быстрой загрузки ELO данных"""
+        try:
+            from bot.utils.faceit_analyzer import faceit_analyzer
+            
+            # Запускаем прогревание в фоновом режиме, не блокируя UI
+            asyncio.create_task(self._background_warm_user_network(user_id))
+            
+        except Exception as e:
+            logger.debug(f"Ошибка запуска прогревания сети для пользователя {user_id}: {e}")
+    
+    async def _background_warm_user_network(self, user_id: int):
+        """Фоновое прогревание сети пользователя"""
+        try:
+            from bot.utils.faceit_analyzer import faceit_analyzer
+            
+            warmed_count = await faceit_analyzer.warm_user_network(user_id)
+            if warmed_count > 0:
+                logger.debug(f"🔥 Прогрета сеть пользователя {user_id}: {warmed_count} профилей")
+            
+        except Exception as e:
+            logger.debug(f"Ошибка фонового прогревания сети для пользователя {user_id}: {e}")

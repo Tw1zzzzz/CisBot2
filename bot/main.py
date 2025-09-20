@@ -6,6 +6,7 @@ import os
 import asyncio
 import random
 from warnings import filterwarnings
+from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 from telegram.warnings import PTBUserWarning
@@ -15,6 +16,10 @@ import httpx
 from .config import Config, setup_logging
 from .utils.keyboards import Keyboards
 from .utils.health_monitor import HealthMonitor
+from .utils.background_processor import get_background_processor
+from .utils.progressive_loader import initialize_progressive_loader, get_progressive_loader
+from .utils.faceit_cache import FaceitCacheManager
+from .utils.performance_monitor import PerformanceMonitor
 from .database.operations import DatabaseManager
 from .handlers.start import StartHandler
 from .handlers.profile import ProfileHandler, ENTERING_NICKNAME, SELECTING_ELO, ENTERING_FACEIT_URL, SELECTING_ROLE, SELECTING_MAPS, SELECTING_PLAYTIME, SELECTING_CATEGORIES, ENTERING_DESCRIPTION, SELECTING_MEDIA, EDITING_MEDIA_TYPE
@@ -40,6 +45,12 @@ class CS2TeammeetBot:
         logger.info("Инициализация Health Monitor...")
         self.health_monitor = HealthMonitor(Config.BOT_TOKEN)
         
+        logger.info("Инициализация Performance Monitor...")
+        self.performance_monitor = PerformanceMonitor(Config)
+        
+        logger.info("Инициализация Cache Manager...")
+        self.cache_manager = FaceitCacheManager()
+        
         logger.info("Создание Telegram Application...")
         self.application = (
             Application.builder()
@@ -57,21 +68,136 @@ class CS2TeammeetBot:
         logger.info("Обработчики настроены успешно")
         logger.info("CS2 Teammeet Bot инициализирован успешно")
     
+    def get_cache_manager(self) -> 'FaceitCacheManager':
+        """Export cache manager for shared use across the application"""
+        return self.cache_manager
+    
     async def _post_init(self, application):
         try:
             await self.db.connect()
             await self.db.init_database()
             logger.info("База данных и пул соединений инициализированы")
+            
+            # Initialize cache manager
+            await self.cache_manager.initialize()
+            logger.info("Cache manager инициализирован успешно")
+            
+            # Initialize background processor
+            bg_processor = get_background_processor()
+            await bg_processor.start()
+            logger.info("Background processor запущен успешно")
+            
+            # Initialize performance monitoring
+            if getattr(Config, 'PERFORMANCE_MONITORING_ENABLED', True):
+                # Set component references for performance monitoring
+                self.performance_monitor.set_component_references(
+                    health_monitor=self.health_monitor,
+                    cache_manager=self.cache_manager,
+                    background_processor=bg_processor
+                )
+                
+                # Inject performance monitor into cache manager
+                if hasattr(self.cache_manager, 'set_performance_monitor'):
+                    self.cache_manager.set_performance_monitor(self.performance_monitor)
+                
+                # Start performance monitoring
+                await self.performance_monitor.start_monitoring()
+                logger.info("Performance monitoring запущен успешно")
+            
+            # Initialize progressive loader
+            from bot.utils.faceit_analyzer import faceit_analyzer
+            
+            # Inject performance monitor into faceit analyzer
+            if hasattr(faceit_analyzer, 'set_performance_monitor'):
+                faceit_analyzer.set_performance_monitor(self.performance_monitor)
+            
+            progressive_loader = initialize_progressive_loader(
+                bot=application.bot, 
+                faceit_analyzer=faceit_analyzer
+            )
+            await progressive_loader.start()
+            logger.info("Progressive loader инициализирован и запущен успешно")
+            
+            # Start cache maintenance tasks
+            await self._start_cache_maintenance()
+            logger.info("Cache maintenance tasks запущены успешно")
+            
+            # Preload popular profiles for faster response
+            if getattr(Config, 'FACEIT_CACHE_PRELOAD_ON_STARTUP', True):
+                await self._preload_popular_profiles()
+                logger.info("Popular profiles preloading completed")
         except Exception:
-            logger.critical("DB init failed", exc_info=True)
+            logger.critical("Initialization failed", exc_info=True)
             raise
     
     async def _post_shutdown(self, application):
         try:
+            # Stop progressive loader first
+            progressive_loader = get_progressive_loader()
+            if progressive_loader:
+                await progressive_loader.stop()
+                logger.info("Progressive loader остановлен")
+            
+            # Stop performance monitoring
+            if hasattr(self, 'performance_monitor') and getattr(Config, 'PERFORMANCE_MONITORING_ENABLED', True):
+                await self.performance_monitor.stop_monitoring()
+                logger.info("Performance monitoring остановлен")
+            
+            # Stop background processor
+            bg_processor = get_background_processor()
+            await bg_processor.stop(timeout=30)
+            logger.info("Background processor остановлен")
+            
+            # Stop cache manager gracefully
+            await self.cache_manager.shutdown()
+            logger.info("Cache manager остановлен успешно")
+            
             await self.db.disconnect()
             logger.info("Пул соединений закрыт")
         except Exception as e:
-            logger.error(f"Ошибка при закрытии пула: {e}")
+            logger.error(f"Ошибка при завершении работы: {e}")
+
+    async def _start_cache_maintenance(self):
+        """Запускает задачи обслуживания кеша"""
+        try:
+            # Cache maintenance tasks are handled internally by cache manager
+            logger.info("Cache maintenance tasks started internally by cache manager")
+            
+            # Set up ELO preloading callback for cache warming
+            from bot.utils.faceit_analyzer import faceit_analyzer
+            self.cache_manager.set_preload_callback(faceit_analyzer.preload_elo_stats)
+            logger.info("ELO preload callback registered with cache manager")
+            
+            # Explicitly bind database manager to faceit analyzer for user network warming
+            faceit_analyzer.db_manager = self.db
+            logger.info("Database manager explicitly bound to faceit analyzer")
+            
+            # Add initial cache warming based on popular profiles
+            if Config.FACEIT_CACHE_WARMING_ENABLED:
+                popular_profiles = await self.db.get_popular_profiles()
+                if popular_profiles:
+                    await faceit_analyzer.preload_elo_stats(popular_profiles)
+                    logger.info(f"Initial cache warming started for {len(popular_profiles)} profiles")
+                    
+        except Exception as e:
+            logger.error(f"Error starting cache maintenance: {e}")
+    
+    async def _preload_popular_profiles(self):
+        """Предзагрузка популярных профилей при запуске бота"""
+        try:
+            from bot.utils.faceit_analyzer import faceit_analyzer
+            
+            logger.info("🚀 Starting popular profiles preloading...")
+            preloaded_count = await faceit_analyzer.preload_popular_profiles()
+            
+            if preloaded_count > 0:
+                logger.info(f"✅ Successfully preloaded {preloaded_count} popular profiles")
+            else:
+                logger.info("📊 No popular profiles found for preloading")
+                
+        except Exception as e:
+            logger.error(f"❌ Error during popular profiles preloading: {e}")
+            # Don't raise the exception to avoid blocking bot startup
 
     def setup_handlers(self):
         # Создаем экземпляры обработчиков
@@ -703,15 +829,43 @@ class CS2TeammeetBot:
 
     async def _error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         """
-        Улучшенный обработчик ошибок с умной обработкой сетевых проблем
+        Улучшенный обработчик ошибок с умной обработкой сетевых проблем и фонового процессора
         """
         error = context.error
+        
+        # Check background processor health on repeated errors
+        bg_processor = get_background_processor()
+        if not bg_processor.is_healthy():
+            logger.warning("Background processor не в состоянии здоровья при обработке ошибки")
+            processor_stats = bg_processor.get_stats()
+            logger.info(f"Background processor статистика: {processor_stats}")
+        
+        # Record error in performance monitoring
+        if hasattr(self, 'performance_monitor') and self.performance_monitor:
+            try:
+                # Update system health score based on error type
+                health_impact = 0.1 if is_network_error else 0.05
+                current_health = getattr(self.performance_monitor.current_metrics, 'system_health_score', 1.0)
+                new_health = max(0.0, current_health - health_impact)
+                self.performance_monitor.collect_health_metrics(
+                    connectivity_status=not is_network_error,
+                    health_score=new_health
+                )
+            except Exception as e:
+                logger.debug(f"Error updating performance metrics in error handler: {e}")
         
         # Проверяем тип ошибки
         is_network_error = isinstance(error, (NetworkError, TimedOut, httpx.ConnectError, httpx.TimeoutException))
         is_dns_error = isinstance(error, httpx.ConnectError) and "getaddrinfo failed" in str(error)
+        is_background_processor_error = "Background processor" in str(error) or "background" in str(error).lower()
         
-        if is_dns_error or is_network_error:
+        if is_background_processor_error:
+            # Handle background processor specific errors
+            logger.warning(f"Background processor ошибка: {error}")
+            processor_stats = bg_processor.get_stats()
+            logger.info(f"Processor stats при ошибке: {processor_stats}")
+            # Continue processing to inform user if needed
+        elif is_dns_error or is_network_error:
             # Логируем сетевые ошибки в специальный network logger
             if update is None:
                 network_logger.warning(f"Сетевая ошибка при получении обновлений: {error}")
@@ -782,10 +936,16 @@ class CS2TeammeetBot:
                         f"Повтор через {retry_delay} секунд..."
                     )
                     
-                    # Проверяем состояние соединения
+                    # Проверяем состояние соединения и кеша
                     health_status = asyncio.run(self.health_monitor.check_connection())
+                    cache_health = asyncio.run(self.cache_manager.health_check())
+                    
                     if health_status:
                         logger.info("Health check пройден, проблема может быть временной")
+                    if cache_health.get('status') == 'healthy':
+                        logger.info("Cache health check пройден")
+                    else:
+                        logger.warning(f"Cache health issues detected: {cache_health.get('error', 'Unknown')}")
                     
                     # Exponential backoff с jitter
                     jitter = random.uniform(0.5, 1.5)  # добавляем случайность
@@ -809,10 +969,37 @@ class CS2TeammeetBot:
                 logger.critical(f"Критическая ошибка при запуске бота: {e}", exc_info=True)
                 raise
 
+# Global shared cache manager instance - will be set when bot initializes
+_shared_cache_manager: Optional['FaceitCacheManager'] = None
+# Global shared database manager instance - will be set when bot initializes
+_shared_db_manager: Optional['DatabaseManager'] = None
+
+def get_shared_cache_manager() -> Optional['FaceitCacheManager']:
+    """Get the shared cache manager instance created by the main bot"""
+    return _shared_cache_manager
+
+def _set_shared_cache_manager(cache_manager: 'FaceitCacheManager') -> None:
+    """Internal function to set the shared cache manager instance"""
+    global _shared_cache_manager
+    _shared_cache_manager = cache_manager
+
+def get_shared_db_manager() -> Optional['DatabaseManager']:
+    """Get the shared database manager instance created by the main bot"""
+    return _shared_db_manager
+
+def _set_shared_db_manager(db_manager: 'DatabaseManager') -> None:
+    """Internal function to set the shared database manager instance"""
+    global _shared_db_manager
+    _shared_db_manager = db_manager
+
 def main():
     """Главная функция запуска бота"""
     try:
         bot = CS2TeammeetBot()
+        # Export the cache manager for global access
+        _set_shared_cache_manager(bot.get_cache_manager())
+        # Export the database manager for global access
+        _set_shared_db_manager(bot.db)
         bot.run()
     except Exception as e:
         logger.critical(f"Не удалось запустить бота: {e}", exc_info=True)

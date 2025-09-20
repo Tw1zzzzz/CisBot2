@@ -4,6 +4,7 @@
 """
 import logging
 import json
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from bot.utils.keyboards import Keyboards
@@ -12,6 +13,8 @@ from bot.utils.cs2_data import (
     validate_faceit_url, format_elo_display, format_faceit_display
 )
 from bot.utils.faceit_analyzer import faceit_analyzer
+from bot.utils.background_processor import TaskPriority
+from bot.utils.progressive_loader import get_progressive_loader
 from bot.utils.notifications import NotificationManager
 from bot.database.operations import DatabaseManager
 
@@ -180,6 +183,12 @@ class ProfileHandler:
         """Команда /profile - показывает профиль пользователя с медиа"""
         user_id = update.effective_user.id
         
+        # Cancel pending ELO updates when navigating to profile
+        progressive_loader = get_progressive_loader()
+        if progressive_loader:
+            await progressive_loader.cancel_pending_updates(user_id)
+            logger.debug(f"Cancelled pending ELO updates for user {user_id} before showing profile")
+        
         # Создаем пользователя если не существует
         await self.db.create_user(
             user_id=user_id,
@@ -199,9 +208,9 @@ class ProfileHandler:
             if profile:
                 is_rejected = profile.is_rejected()
                 
-                # Показываем профиль с медиа сразу
+                # Progressive loading: Format basic profile first (without ELO API calls)
                 text = "👤 <b>Ваш профиль</b>\n\n"
-                text += await self._format_profile_text(profile, show_faceit_stats=True)
+                text += await self._format_profile_text_basic(profile, show_faceit_stats=False, user_id=user_id)
                 
                 # Определяем клавиатуру в зависимости от статуса профиля
                 if is_rejected:
@@ -209,27 +218,56 @@ class ProfileHandler:
                 else:
                     reply_markup = Keyboards.profile_main_menu()
                 
+                # Progressive loading: Send basic profile and schedule ELO update
+                chat_id = None
                 if update.callback_query:
                     query = update.callback_query
                     await query.answer()
-                    
-                    # Отправляем профиль с медиа
-                    await self.send_profile_with_media(
-                        chat_id=query.message.chat.id,
-                        profile=profile,
-                        text=text,
-                        reply_markup=reply_markup,
-                        context=context
-                    )
+                    chat_id = query.message.chat.id
                 else:
-                    # Отправляем профиль с медиа
-                    await self.send_profile_with_media(
-                        chat_id=update.effective_chat.id,
-                        profile=profile,
-                        text=text,
-                        reply_markup=reply_markup,
-                        context=context
-                    )
+                    chat_id = update.effective_chat.id
+                
+                # Send basic profile first
+                message_info = await self.send_profile_with_media(
+                    chat_id=chat_id,
+                    profile=profile,
+                    text=text,
+                    reply_markup=reply_markup,
+                    context=context
+                )
+                
+                # Progressive loading: Schedule ELO update if profile has faceit nickname
+                if message_info and len(message_info) >= 4:
+                    chat_id_msg, message_id, is_media, is_photo = message_info
+                    
+                    # Only register progressive updates if message was sent successfully
+                    if message_id > 0:
+                        # Get progressive loader
+                        progressive_loader = get_progressive_loader()
+                        if progressive_loader and profile.game_nickname and profile.game_nickname.strip():
+                            # Generate context ID to prevent race conditions
+                            import uuid
+                            context_id = f"profile_{user_id}_{profile.user_id}_{uuid.uuid4().hex[:8]}"
+                            
+                            # Set user context
+                            await progressive_loader.set_user_context(user_id, context_id)
+                            
+                            # Register message for ELO updates
+                            message_key = progressive_loader.register_message(
+                                chat_id_msg, message_id, is_media, is_photo,
+                                user_id, 'profile', context_id
+                            )
+                            
+                            # Create faceit data for the update
+                            faceit_data = {
+                                'faceit_nickname': profile.game_nickname,
+                                'faceit_elo': profile.faceit_elo
+                            }
+                            
+                            # Schedule the ELO update
+                            await self._schedule_profile_elo_update(
+                                message_key, profile, faceit_data, user_id
+                            )
             else:
                 # Если has_profile = True, но get_profile = None, то профиль поврежден
                 logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: has_profile=True, но get_profile=None для user_id={user_id}")
@@ -280,7 +318,7 @@ class ProfileHandler:
                     parse_mode='HTML'
             )
 
-    async def _format_profile_text(self, profile, show_faceit_stats=False) -> str:
+    async def _format_profile_text_basic(self, profile, show_faceit_stats=False, user_id=None) -> str:
         """Форматирует текст профиля для отображения"""
         from bot.utils.cs2_data import format_elo_display, format_role_display, extract_faceit_nickname, PLAYTIME_OPTIONS, format_faceit_elo_display
         from bot.utils.faceit_analyzer import faceit_analyzer
@@ -300,43 +338,10 @@ class ProfileHandler:
         
         text += f"🎮 <b>Игровой ник:</b> {profile.game_nickname}\n"
         
-        # Получаем ELO статистику через Faceit API
-        elo_stats = None
-        try:
-            if profile.game_nickname and profile.game_nickname.strip():
-                elo_stats = await faceit_analyzer.get_elo_stats_by_nickname(profile.game_nickname)
-        except Exception as e:
-            logger.warning(f"Не удалось получить ELO статистику для {profile.game_nickname}: {e}")
-        
-        # Отображаем ELO с мин/макс значениями если есть данные (ИСПРАВЛЕННАЯ ЛОГИКА)
-        if elo_stats:
-            # Проверяем корректность значений перед передачей в format_faceit_elo_display()
-            lowest_elo = elo_stats.get('lowest_elo', 0)
-            highest_elo = elo_stats.get('highest_elo', 0)
-            
-            # Дополнительная валидация ELO значений
-            try:
-                if isinstance(lowest_elo, (int, float)) and isinstance(highest_elo, (int, float)):
-                    lowest_elo = int(lowest_elo) if lowest_elo >= 0 else 0
-                    highest_elo = int(highest_elo) if highest_elo >= 0 else 0
-                    
-                    # Показываем мин/макс даже если API вернул ошибку, но есть валидные данные
-                    if lowest_elo > 0 or highest_elo > 0:
-                        logger.info(f"🔥 PROFILE: Показываем ELO с мин/макс для {profile.game_nickname}: мин={lowest_elo} макс={highest_elo}")
-                        text += f"🎯 <b>ELO Faceit:</b> {format_faceit_elo_display(profile.faceit_elo, lowest_elo, highest_elo, profile.game_nickname)}\n"
-                    else:
-                        # Если мин/макс равны 0, показываем только текущий ELO
-                        text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
-                else:
-                    logger.warning(f"⚠️ PROFILE: ELO значения некорректного типа для {profile.game_nickname}: lowest={type(lowest_elo)}, highest={type(highest_elo)}")
-                    # Fallback на базовое отображение при некорректных данных
-                    text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
-            except Exception as elo_validation_error:
-                logger.error(f"Ошибка валидации ELO для {profile.game_nickname}: {elo_validation_error}")
-                # Fallback на базовое отображение при ошибке валидации
-                text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
+        # Progressive loading: Show ELO loading placeholder immediately
+        if profile.game_nickname and profile.game_nickname.strip():
+            text += f"🎯 <b>ELO Faceit:</b> {Keyboards.elo_loading_placeholder()}\n"
         else:
-            # Fallback на базовое отображение ELO
             text += f"🎯 <b>ELO Faceit:</b> {format_elo_display(profile.faceit_elo)}\n"
         
         # Faceit профиль
@@ -384,43 +389,144 @@ class ProfileHandler:
         
         return text
 
-    async def send_profile_with_media(self, chat_id: int, profile, text: str, reply_markup=None, context=None):
-        """Отправляет профиль с медиа если есть"""
+    async def _format_profile_text_with_elo(self, profile, elo_data, show_faceit_stats=False, user_id=None) -> str:
+        """Форматирует текст профиля с ELO данными (для прогрессивного обновления)"""
         try:
+            # Get basic profile text
+            text = await self._format_profile_text_basic(profile, show_faceit_stats, user_id)
+            
+            # Replace ELO loading placeholder with actual data
+            if elo_data:
+                from bot.utils.cs2_data import format_faceit_elo_display
+                
+                # Get min/max ELO from API data
+                lowest_elo = elo_data.get('lowest_elo', 0)
+                highest_elo = elo_data.get('highest_elo', 0)
+                
+                # Validate ELO data
+                if isinstance(lowest_elo, (int, float)) and isinstance(highest_elo, (int, float)):
+                    lowest_elo = int(lowest_elo) if lowest_elo >= 0 else 0
+                    highest_elo = int(highest_elo) if highest_elo >= 0 else 0
+                    
+                    # Format ELO display with min/max if available
+                    if lowest_elo > 0 or highest_elo > 0:
+                        elo_display = format_faceit_elo_display(profile.faceit_elo, lowest_elo, highest_elo, profile.game_nickname)
+                        logger.debug(f"ELO updated for profile {profile.game_nickname}: {profile.faceit_elo} (min: {lowest_elo}, max: {highest_elo})")
+                    else:
+                        elo_display = format_elo_display(profile.faceit_elo)
+                else:
+                    elo_display = format_elo_display(profile.faceit_elo)
+                
+                # Replace loading placeholder with actual ELO
+                loading_placeholder = Keyboards.elo_loading_placeholder()
+                text = text.replace(loading_placeholder, elo_display)
+            
+            return text
+            
+        except Exception as e:
+            logger.error(f"Error formatting profile with ELO for {profile.user_id}: {e}", exc_info=True)
+            # Return basic profile text as fallback
+            return await self._format_profile_text_basic(profile, show_faceit_stats, user_id)
+
+    async def _schedule_profile_elo_update(self, message_key: str, profile, faceit_data: dict, user_id: int) -> None:
+        """Schedule ELO update for a profile"""
+        try:
+            progressive_loader = get_progressive_loader()
+            if not progressive_loader:
+                logger.warning("Progressive loader not available for profile ELO update")
+                return
+                
+            # Create format callback for ELO updates
+            async def format_callback(updated_faceit_data, include_elo=True):
+                if include_elo:
+                    formatted_text = await self._format_profile_text_with_elo(
+                        profile, updated_faceit_data, show_faceit_stats=True, user_id=user_id
+                    )
+                    formatted_text = "👤 <b>Ваш профиль</b>\n\n" + formatted_text
+                else:
+                    formatted_text = await self._format_profile_text_basic(
+                        profile, show_faceit_stats=True, user_id=user_id
+                    )
+                    formatted_text = "👤 <b>Ваш профиль</b>\n\n" + formatted_text
+                
+                # Determine appropriate keyboard
+                if profile.is_rejected():
+                    reply_markup = Keyboards.profile_rejected_menu()
+                else:
+                    reply_markup = Keyboards.profile_main_menu()
+                    
+                return formatted_text, reply_markup
+            
+            # Use HIGH priority for own profile, NORMAL for others
+            priority = TaskPriority.HIGH if user_id == profile.user_id else TaskPriority.NORMAL
+            
+            # Schedule the ELO update
+            success = await progressive_loader.schedule_elo_update(
+                message_key, faceit_data, format_callback, priority
+            )
+            
+            if success:
+                logger.debug(f"ELO update scheduled for profile {profile.user_id}")
+            else:
+                logger.warning(f"Failed to schedule ELO update for profile {profile.user_id}")
+                
+        except Exception as e:
+            logger.error(f"Error scheduling ELO update for profile {profile.user_id}: {e}", exc_info=True)
+
+    async def send_profile_with_media(self, chat_id: int, profile, text: str, reply_markup=None, context=None):
+        """Отправляет профиль с медиа если есть и возвращает информацию о сообщении"""
+        try:
+            sent_message = None
             if profile.has_media():
                 if profile.is_photo():
-                    await context.bot.send_photo(
+                    sent_message = await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=profile.media_file_id,
-                        caption=text,
+                        caption=text[:1020],  # Telegram caption limit
                         parse_mode='HTML',
                         reply_markup=reply_markup
                     )
                 elif profile.is_video():
-                    await context.bot.send_video(
+                    sent_message = await context.bot.send_video(
                         chat_id=chat_id,
                         video=profile.media_file_id,
-                        caption=text,
+                        caption=text[:1020],  # Telegram caption limit
                         parse_mode='HTML',
                         reply_markup=reply_markup
                     )
             else:
                 # Отправляем только текст
-                await context.bot.send_message(
+                sent_message = await context.bot.send_message(
                     chat_id=chat_id,
                     text=text,
                     parse_mode='HTML',
                     reply_markup=reply_markup
                 )
+                
+            # Return message info for successful send
+            if sent_message:
+                is_media = profile.has_media()
+                is_photo = profile.is_photo()
+                return (sent_message.chat_id, sent_message.message_id, is_media, is_photo)
+                
         except Exception as e:
             logger.error(f"Ошибка отправки профиля с медиа: {e}")
             # Фолбэк - отправляем только текст
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode='HTML',
-                reply_markup=reply_markup
-            )
+            try:
+                sent_message = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode='HTML',
+                    reply_markup=reply_markup
+                )
+                # Return message info for fallback send
+                if sent_message:
+                    return (sent_message.chat_id, sent_message.message_id, False, False)
+            except Exception as fallback_error:
+                logger.error(f"Fallback отправка профиля также неудачна: {fallback_error}")
+                
+        # Return fallback info if all sends failed
+        return (chat_id, 0, False, False)
 
     # === СОЗДАНИЕ ПРОФИЛЯ ===
     
@@ -1382,6 +1488,12 @@ class ProfileHandler:
             logger.error("view_full_profile: No callback_query or message found in update")
             return
         
+        # Cancel pending ELO updates when viewing full profile
+        progressive_loader = get_progressive_loader()
+        if progressive_loader:
+            await progressive_loader.cancel_pending_updates(user_id)
+            logger.debug(f"Cancelled pending ELO updates for user {user_id} before viewing full profile")
+        
         # 🔥 ОТЛАДКА: Проверяем существование профиля ДО get_profile
         has_profile_before = await self.db.has_profile(user_id)
         logger.info(f"🔥 view_full_profile START: user_id={user_id}, has_profile_before={has_profile_before}")
@@ -1426,13 +1538,27 @@ class ProfileHandler:
         from bot.utils.cs2_data import format_elo_display, format_role_display, extract_faceit_nickname, PLAYTIME_OPTIONS, CS2_MAPS, format_faceit_elo_display
         from bot.utils.faceit_analyzer import faceit_analyzer
         
-        # Получаем ELO статистику через Faceit API
+        # Получаем ELO статистику через Background Processor (NORMAL priority для full profile)
         elo_stats = None
         try:
             if profile.game_nickname and profile.game_nickname.strip():
-                elo_stats = await faceit_analyzer.get_elo_stats_by_nickname(profile.game_nickname)
+                # Use NORMAL priority for full profile text (less time-critical)
+                elo_future = await faceit_analyzer.get_elo_stats_by_nickname_priority(profile.game_nickname, TaskPriority.NORMAL)
+                
+                try:
+                    # Wait for result with timeout 
+                    elo_stats = await asyncio.wait_for(elo_future, timeout=8.0)
+                    logger.debug(f"✅ Получена ELO статистика для full profile {profile.game_nickname}")
+                except asyncio.TimeoutError:
+                    logger.warning(f"⏰ Таймаут получения ELO для full profile {profile.game_nickname}")
+                    elo_stats = None
         except Exception as e:
-            logger.warning(f"Не удалось получить ELO статистику для {profile.game_nickname}: {e}")
+            logger.warning(f"❌ Ошибка фонового процессора для full profile {profile.game_nickname}: {e}")
+            # Fallback to direct call
+            try:
+                elo_stats = await faceit_analyzer.get_elo_stats_by_nickname(profile.game_nickname)
+            except Exception:
+                elo_stats = None
         
         # Отображаем ELO с мин/макс значениями если есть данные (ИСПРАВЛЕННАЯ ЛОГИКА В _format_full_profile_text)
         if elo_stats:

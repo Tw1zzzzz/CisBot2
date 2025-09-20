@@ -12,20 +12,39 @@ from typing import List, Optional, Dict, Any
 import sqlite3
 import time
 import random
+from typing import List, Optional, Dict, Any
 from .models import User, Profile, Like, Match, UserSettings, Moderator
 from ..config import Config
 
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self._pool = None
+    def __init__(self, db_path: str = None, databases: Dict[str, str] = None):
+        """
+        Initialize DatabaseManager with support for multiple databases.
+        
+        Args:
+            db_path: Legacy parameter for main database path (backward compatibility)
+            databases: Dictionary mapping database types to paths, e.g. {'main': '/path/main.db', 'cache': '/path/cache.db'}
+        """
+        # Backward compatibility: if db_path provided, use as main database
+        if db_path and not databases:
+            databases = {'main': db_path}
+        elif not databases:
+            raise ValueError("Either db_path or databases parameter must be provided")
+        
+        self.databases = databases
+        self.db_path = databases.get('main', db_path)  # For backward compatibility
+        
+        # Connection pools for each database type
+        self._pools = {}
         self._pool_size = Config.DB_POOL_SIZE
         self._is_connected = False
         self._closing = False
         self._lock = asyncio.Lock()
-        logger.info(f"Инициализация DatabaseManager с путем: {db_path} (размер пула: {self._pool_size})")
+        
+        db_info = ", ".join([f"{k}: {v}" for k, v in databases.items()])
+        logger.info(f"Инициализация DatabaseManager с базами данных: {db_info} (размер пула: {self._pool_size})")
 
     async def _execute_with_retry(self, func, *args, max_retries=3, **kwargs):
         """
@@ -56,7 +75,7 @@ class DatabaseManager:
         raise sqlite3.OperationalError("Max retries exceeded for database operation")
 
     async def connect(self):
-        """Создает пул соединений с базой данных"""
+        """Создает пулы соединений для всех баз данных"""
         async with self._lock:
             if self._is_connected:
                 return
@@ -65,132 +84,159 @@ class DatabaseManager:
             self._closing = False
             
             try:
-                self._pool = asyncio.Queue(maxsize=self._pool_size)
-                
-                # Создаем соединения для пула
-                for _ in range(self._pool_size):
-                    conn = await self._create_connection()
-                    await self._pool.put(conn)
+                # Создаем пулы для каждой базы данных
+                for db_type, db_path in self.databases.items():
+                    pool = asyncio.Queue(maxsize=self._pool_size)
+                    
+                    # Создаем соединения для пула
+                    for _ in range(self._pool_size):
+                        conn = await self._create_connection(db_path=db_path, db_type=db_type)
+                        await pool.put(conn)
+                    
+                    self._pools[db_type] = pool
                 
                 self._is_connected = True
-                logger.info(f"Пул соединений создан успешно ({self._pool_size} соединений)")
+                logger.info(f"Пулы соединений созданы успешно для {len(self._pools)} баз данных ({self._pool_size} соединений каждый)")
             except Exception as e:
-                logger.error(f"Ошибка создания пула соединений: {e}")
-                await self._drain_and_close_pool()
+                logger.error(f"Ошибка создания пулов соединений: {e}")
+                await self._drain_and_close_pools()
                 raise
 
-    async def _drain_and_close_pool(self):
+    async def _drain_and_close_pools(self):
         """
-        Дренирует и закрывает все соединения в пуле.
+        Дренирует и закрывает все соединения во всех пулах.
         Использует get_nowait() для неблокирующего дренажа.
         """
-        if not self._pool:
+        if not self._pools:
             return
         
         try:
-            # Устанавливаем флаг закрытия перед дренированием очереди
+            # Устанавливаем флаг закрытия перед дренированием очередей
             self._closing = True
             
-            # Итерируемся по пулу до опустошения с неблокирующим get_nowait()
-            while not self._pool.empty():
-                try:
-                    conn = self._pool.get_nowait()
-                    await conn.close()
-                except asyncio.QueueEmpty:
-                    # Пул опустошен
-                    break
-                except Exception as e:
-                    # Логируем ошибки закрытия отдельных соединений
-                    logger.warning(f"Ошибка закрытия соединения: {e}")
+            # Дренируем все пулы
+            for db_type, pool in self._pools.items():
+                logger.info(f"Закрываем пул соединений для {db_type}")
+                
+                # Итерируемся по пулу до опустошения с неблокирующим get_nowait()
+                while not pool.empty():
+                    try:
+                        conn = pool.get_nowait()
+                        await conn.close()
+                    except asyncio.QueueEmpty:
+                        # Пул опустошен
+                        break
+                    except Exception as e:
+                        # Логируем ошибки закрытия отдельных соединений
+                        logger.warning(f"Ошибка закрытия соединения в {db_type}: {e}")
             
             # После дренажа очищаем состояние
-            self._pool = None
+            self._pools = {}
             self._is_connected = False
             self._closing = False
-            logger.info("Пул соединений закрыт и очищен")
+            logger.info("Все пулы соединений закрыты и очищены")
         except Exception as e:
-            logger.error(f"Ошибка закрытия пула соединений: {e}")
+            logger.error(f"Ошибка закрытия пулов соединений: {e}")
 
     async def disconnect(self):
         """
-        Закрывает все соединения в пуле и очищает состояние.
-        Обеспечивает корректное закрытие с помощью _drain_and_close_pool().
+        Закрывает все соединения во всех пулах и очищает состояние.
+        Обеспечивает корректное закрытие с помощью _drain_and_close_pools().
         """
         async with self._lock:
-            if not self._pool:
+            if not self._pools:
                 return
             
-            await self._drain_and_close_pool()
+            await self._drain_and_close_pools()
 
-    async def _create_connection(self) -> aiosqlite.Connection:
-        """Создает одно соединение с настройками"""
+    async def _create_connection(self, db_path: str = None, db_type: str = 'main') -> aiosqlite.Connection:
+        """Создает одно соединение с настройками для указанной базы данных"""
+        if not db_path:
+            db_path = self.db_path  # Fallback для обратной совместимости
+        
         conn = await aiosqlite.connect(
-            self.db_path, 
+            db_path, 
             timeout=Config.DB_CONNECTION_TIMEOUT
         )
-        # Настраиваем соединение
-        await conn.execute("PRAGMA foreign_keys = ON")
+        
+        # Базовые настройки для всех типов БД
         await conn.execute("PRAGMA journal_mode = WAL")
         await conn.execute("PRAGMA synchronous = NORMAL")
-        await conn.execute("PRAGMA cache_size = 1000")
         await conn.execute("PRAGMA temp_store = memory")
+        
+        # Специфичные настройки в зависимости от типа БД
+        if db_type == 'main':
+            await conn.execute("PRAGMA foreign_keys = ON")
+            await conn.execute("PRAGMA cache_size = 1000")
+        elif db_type == 'cache':
+            # Оптимизации для кеш-базы
+            await conn.execute("PRAGMA cache_size = 10000")
+            await conn.execute("PRAGMA locking_mode = NORMAL")  # Лучше для кеша
+        
+        logger.debug(f"Создано соединение для {db_type} ({db_path})")
         return conn
 
     @asynccontextmanager
-    async def acquire_connection(self):
-        """Контекстный менеджер для получения соединения из пула с проверкой здоровья"""
+    async def acquire_connection(self, db_type: str = 'main'):
+        """Контекстный менеджер для получения соединения из соответствующего пула с проверкой здоровья"""
         if self._closing:
             raise RuntimeError("DatabaseManager is closing, cannot acquire connection")
         
         if not self._is_connected:
-            logger.warning("Pool not initialized; calling connect() implicitly. Consider explicit db.connect() in startup.")
+            logger.warning("Pools not initialized; calling connect() implicitly. Consider explicit db.connect() in startup.")
             if self._closing:
                 raise RuntimeError("Cannot auto-connect while DatabaseManager is closing")
             await self.connect()
         
+        if db_type not in self._pools:
+            raise ValueError(f"Database type '{db_type}' not configured. Available: {list(self._pools.keys())}")
+        
+        pool = self._pools[db_type]
+        
         try:
-            # Получаем соединение из пула с таймаутом
+            # Получаем соединение из соответствующего пула с таймаутом
             conn = await asyncio.wait_for(
-                self._pool.get(), 
+                pool.get(), 
                 timeout=Config.DB_POOL_TIMEOUT
             )
         except asyncio.TimeoutError:
             # Логируем загруженность пула при таймауте
-            pool_size = self._pool.qsize() if self._pool else 0
+            pool_size = pool.qsize() if pool else 0
             pool_max_size = self._pool_size
             pool_usage = f"{pool_max_size - pool_size}/{pool_max_size}"
             logger.error(
-                f"Pool timeout after {Config.DB_POOL_TIMEOUT}s. "
+                f"{db_type} pool timeout after {Config.DB_POOL_TIMEOUT}s. "
                 f"Pool occupancy: {pool_usage} connections in use. "
                 f"Available: {pool_size}/{pool_max_size}. "
                 f"Pool may be exhausted or connections are not being released properly."
             )
             raise RuntimeError(
-                f"Database connection timeout after {Config.DB_POOL_TIMEOUT} seconds. "
+                f"{db_type} database connection timeout after {Config.DB_POOL_TIMEOUT} seconds. "
                 f"Pool occupancy: {pool_usage}. Pool may be exhausted."
             )
         
         # Логируем загруженность пула после получения соединения
-        available = self._pool.qsize() if self._pool else 0
+        available = pool.qsize() if pool else 0
         in_use = self._pool_size - available + 1  # +1 для текущего соединения
-        logger.debug(f"Connection acquired from pool. Pool status: {in_use}/{self._pool_size} in use, {available} available")
+        logger.debug(f"Connection acquired from {db_type} pool. Pool status: {in_use}/{self._pool_size} in use, {available} available")
         
         # Проверяем здоровье соединения
         try:
-            # Легкая проверка здоровья - PRAGMA foreign_keys или SELECT 1
-            await conn.execute('PRAGMA foreign_keys')
-            logger.debug("Connection health check passed")
+            # Легкая проверка здоровья - SELECT 1 (универсально для всех типов БД)
+            await conn.execute('SELECT 1')
+            logger.debug(f"{db_type} connection health check passed")
         except Exception as e:
-            logger.warning(f"Connection health check failed: {e}. Creating fresh connection.")
+            logger.warning(f"{db_type} connection health check failed: {e}. Creating fresh connection.")
             # Закрываем неработающее соединение
             try:
                 await conn.close()
             except Exception as close_e:
-                logger.warning(f"Failed to close broken connection: {close_e}")
+                logger.warning(f"Failed to close broken {db_type} connection: {close_e}")
             
-            # Создаем новое соединение
-            conn = await self._create_connection()
-            logger.info("Fresh connection created after health check failure")
+            # Создаем новое соединение для соответствующей БД
+            db_path = self.databases[db_type]
+            conn = await self._create_connection(db_path=db_path, db_type=db_type)
+            logger.info(f"Fresh {db_type} connection created after health check failure")
         
         # Устанавливаем row_factory в None по умолчанию
         conn.row_factory = None
@@ -218,34 +264,35 @@ class DatabaseManager:
                 conn.row_factory = None
                 
                 # Если пул закрывается или был закрыт/уничтожен во время работы, закрываем соединение
-                if self._closing or self._pool is None:
+                if self._closing or db_type not in self._pools or self._pools[db_type] is None:
                     try:
                         await conn.close()
                     except Exception as e:
-                        logger.warning(f"Ошибка закрытия соединения: {e}")
+                        logger.warning(f"Ошибка закрытия {db_type} соединения: {e}")
                 elif connection_is_healthy:
-                    # Возвращаем здоровое соединение в пул
-                    await self._pool.put(conn)
+                    # Возвращаем здоровое соединение в соответствующий пул
+                    await pool.put(conn)
                     # Логируем текущее состояние пула после возврата
-                    available = self._pool.qsize()
+                    available = pool.qsize()
                     in_use = self._pool_size - available
-                    logger.debug(f"Connection returned to pool. Pool status: {in_use}/{self._pool_size} in use, {available} available")
+                    logger.debug(f"{db_type} connection returned to pool. Pool status: {in_use}/{self._pool_size} in use, {available} available")
                 else:
                     # Соединение нездорово - закрываем его и создаем новое для пула
-                    logger.info("Replacing unhealthy connection in pool")
+                    logger.info(f"Replacing unhealthy {db_type} connection in pool")
                     try:
                         await conn.close()
                     except Exception as e:
-                        logger.warning(f"Failed to close unhealthy connection: {e}")
+                        logger.warning(f"Failed to close unhealthy {db_type} connection: {e}")
                     
                     # Создаем новое соединение для пула, если не закрываемся
                     if not self._closing:
                         try:
-                            fresh_conn = await self._create_connection()
-                            await self._pool.put(fresh_conn)
-                            logger.info("Added fresh connection to pool")
+                            db_path = self.databases[db_type]
+                            fresh_conn = await self._create_connection(db_path=db_path, db_type=db_type)
+                            await pool.put(fresh_conn)
+                            logger.info(f"Added fresh {db_type} connection to pool")
                         except Exception as e:
-                            logger.error(f"Failed to create replacement connection: {e}")
+                            logger.error(f"Failed to create replacement {db_type} connection: {e}")
 
     async def init_database(self):
         """
@@ -1623,3 +1670,286 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Ошибка проверки статуса ответа на лайк {liker_id}->{liked_id}: {e}")
             return 'pending' 
+
+    # ===== CACHE-RELATED METHODS =====
+    # Methods to support cache warming and maintenance
+    
+    async def get_popular_profiles(self, limit: int = 50) -> List[str]:
+        """
+        Получает популярные профили на основе активности пользователей
+        
+        Args:
+            limit: Максимальное количество профилей для возврата
+            
+        Returns:
+            List[str]: Список никнеймов популярных профилей
+        """
+        try:
+            async with self.acquire_connection() as db:
+                # Получаем популярные профили на основе лайков, матчей и активности
+                # Используем game_nickname из profiles и created_at из users как индикатор активности
+                cursor = await db.execute("""
+                    SELECT p.game_nickname, 
+                           COUNT(DISTINCT l.liker_id) as like_count,
+                           COUNT(DISTINCT m.id) as match_count,
+                           u.created_at
+                    FROM profiles p
+                    JOIN users u ON p.user_id = u.user_id
+                    LEFT JOIN likes l ON p.user_id = l.liked_id
+                    LEFT JOIN matches m ON p.user_id IN (m.user1_id, m.user2_id)
+                    WHERE p.game_nickname IS NOT NULL 
+                          AND p.game_nickname != ''
+                          AND p.moderation_status = 'approved'
+                          AND u.is_active = 1
+                          AND (l.created_at >= datetime('now', '-30 days') OR m.created_at >= datetime('now', '-30 days'))
+                    GROUP BY p.user_id, p.game_nickname
+                    HAVING (like_count + match_count) > 0
+                    ORDER BY (like_count * 2 + match_count) DESC, p.updated_at DESC
+                    LIMIT ?
+                """, (limit,))
+                
+                rows = await cursor.fetchall()
+                profiles = [row[0] for row in rows if row[0]]
+                
+                logger.debug(f"Найдено {len(profiles)} популярных профилей для разогрева кеша")
+                return profiles
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения популярных профилей: {e}")
+            return []
+
+    async def get_user_network_profiles(self, user_id: int, limit: int = 20) -> List[str]:
+        """
+        Получает профили из сети пользователя (тиммейты, недавние взаимодействия)
+        
+        Args:
+            user_id: ID пользователя
+            limit: Максимальное количество профилей
+            
+        Returns:
+            List[str]: Список никнеймов из сети пользователя
+        """
+        try:
+            async with self.acquire_connection() as db:
+                # Получаем профили тиммейтов и недавних взаимодействий
+                # Используем game_nickname из profiles, поскольку faceit_nickname отсутствует в users
+                cursor = await db.execute("""
+                    SELECT DISTINCT p.game_nickname
+                    FROM profiles p
+                    JOIN users u ON p.user_id = u.user_id
+                    WHERE p.game_nickname IS NOT NULL 
+                          AND p.game_nickname != ''
+                          AND p.moderation_status = 'approved'
+                          AND u.is_active = 1
+                          AND p.user_id IN (
+                              -- Тиммейты из матчей
+                              SELECT CASE 
+                                  WHEN m.user1_id = ? THEN m.user2_id
+                                  ELSE m.user1_id
+                              END as teammate_id
+                              FROM matches m
+                              WHERE (m.user1_id = ? OR m.user2_id = ?)
+                              AND m.created_at >= datetime('now', '-14 days')
+                              AND m.is_active = 1
+                              
+                              UNION
+                              
+                              -- Пользователи, которых лайкнул или которые лайкнули
+                              SELECT l.liked_id FROM likes l 
+                              WHERE l.liker_id = ? AND l.created_at >= datetime('now', '-7 days')
+                              
+                              UNION
+                              
+                              SELECT l.liker_id FROM likes l 
+                              WHERE l.liked_id = ? AND l.created_at >= datetime('now', '-7 days')
+                          )
+                    ORDER BY p.updated_at DESC
+                    LIMIT ?
+                """, (user_id, user_id, user_id, user_id, user_id, limit))
+                
+                rows = await cursor.fetchall()
+                profiles = [row[0] for row in rows if row[0]]
+                
+                logger.debug(f"Найдено {len(profiles)} профилей сети для пользователя {user_id}")
+                return profiles
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения профилей сети для {user_id}: {e}")
+            return []
+
+    async def get_recent_search_profiles(self, hours: int = 24, limit: int = 30) -> List[str]:
+        """
+        Получает профили из недавних результатов поиска
+        
+        Args:
+            hours: Количество часов назад для поиска активности
+            limit: Максимальное количество профилей
+            
+        Returns:
+            List[str]: Список никнеймов из недавних поисков
+        """
+        try:
+            async with self.acquire_connection() as db:
+                # Получаем профили с недавней активностью (лайки или обновления)
+                cursor = await db.execute("""
+                    SELECT DISTINCT p.game_nickname
+                    FROM profiles p
+                    JOIN users u ON p.user_id = u.user_id
+                    LEFT JOIN likes l ON p.user_id = l.liked_id
+                    WHERE p.game_nickname IS NOT NULL 
+                          AND p.game_nickname != ''
+                          AND p.moderation_status = 'approved'
+                          AND u.is_active = 1
+                          AND (
+                              p.updated_at >= datetime('now', '-' || ? || ' hours') OR
+                              l.created_at >= datetime('now', '-' || ? || ' hours')
+                          )
+                    ORDER BY p.updated_at DESC
+                    LIMIT ?
+                """, (hours, hours, limit))
+                
+                rows = await cursor.fetchall()
+                profiles = [row[0] for row in rows if row[0]]
+                
+                logger.debug(f"Найдено {len(profiles)} профилей из недавних поисков")
+                return profiles
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения профилей недавних поисков: {e}")
+            return []
+
+    async def track_profile_access(self, nickname: str, access_type: str = 'view') -> None:
+        """
+        Отслеживает доступ к профилю для оптимизации кеша
+        
+        Args:
+            nickname: Никнейм профиля
+            access_type: Тип доступа ('view', 'search', 'match')
+        """
+        try:
+            async with self.acquire_connection() as db:
+                # В будущем можно добавить отдельную таблицу для отслеживания доступа к профилям
+                # Пока просто логируем для дебага
+                logger.debug(f"Профиль {nickname} был использован: {access_type}")
+                
+        except Exception as e:
+            logger.error(f"Ошибка отслеживания доступа к профилю {nickname}: {e}")
+
+    async def get_active_users(self, days: int = 7, limit: int = 100) -> List[int]:
+        """
+        Получает активных пользователей для разогрева кеша
+        
+        Args:
+            days: Количество дней для определения активности
+            limit: Максимальное количество пользователей
+            
+        Returns:
+            List[int]: Список ID активных пользователей
+        """
+        try:
+            async with self.acquire_connection() as db:
+                # Определяем активность на основе недавних лайков или обновлений профиля
+                cursor = await db.execute("""
+                    SELECT DISTINCT u.user_id
+                    FROM users u
+                    LEFT JOIN likes l ON u.user_id = l.liker_id
+                    LEFT JOIN profiles p ON u.user_id = p.user_id
+                    WHERE u.is_active = 1
+                    AND (
+                        l.created_at >= datetime('now', '-' || ? || ' days') OR
+                        p.updated_at >= datetime('now', '-' || ? || ' days')
+                    )
+                    ORDER BY COALESCE(l.created_at, p.updated_at, u.created_at) DESC
+                    LIMIT ?
+                """, (days, days, limit))
+                
+                rows = await cursor.fetchall()
+                user_ids = [row[0] for row in rows]
+                
+                logger.debug(f"Найдено {len(user_ids)} активных пользователей")
+                return user_ids
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения активных пользователей: {e}")
+            return []
+
+    async def get_trending_profiles(self, days: int = 3, limit: int = 25) -> List[str]:
+        """
+        Получает профили с растущей популярностью
+        
+        Args:
+            days: Количество дней для анализа трендов
+            limit: Максимальное количество профилей
+            
+        Returns:
+            List[str]: Список никнеймов трендовых профилей
+        """
+        try:
+            async with self.acquire_connection() as db:
+                # Находим профили с увеличивающимся количеством лайков
+                cursor = await db.execute("""
+                    SELECT p.game_nickname,
+                           COUNT(l.liker_id) as recent_likes
+                    FROM profiles p
+                    JOIN users u ON p.user_id = u.user_id
+                    JOIN likes l ON p.user_id = l.liked_id
+                    WHERE p.game_nickname IS NOT NULL 
+                          AND p.game_nickname != ''
+                          AND p.moderation_status = 'approved'
+                          AND u.is_active = 1
+                          AND l.created_at >= datetime('now', '-' || ? || ' days')
+                    GROUP BY p.user_id, p.game_nickname
+                    HAVING recent_likes >= 2
+                    ORDER BY recent_likes DESC
+                    LIMIT ?
+                """, (days, limit))
+                
+                rows = await cursor.fetchall()
+                profiles = [row[0] for row in rows if row[0]]
+                
+                logger.debug(f"Найдено {len(profiles)} трендовых профилей")
+                return profiles
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения трендовых профилей: {e}")
+            return []
+
+    async def get_stale_cache_candidates(self, days: int = 1) -> List[str]:
+        """
+        Получает профили, которые могут нуждаться в обновлении кеша
+        
+        Args:
+            days: Количество дней для определения устаревания
+            
+        Returns:
+            List[str]: Список никнеймов для обновления кеша
+        """
+        try:
+            async with self.acquire_connection() as db:
+                # Находим профили активных пользователей, которые недавно обновлялись
+                cursor = await db.execute("""
+                    SELECT DISTINCT p.game_nickname
+                    FROM profiles p
+                    JOIN users u ON p.user_id = u.user_id
+                    LEFT JOIN likes l ON p.user_id = l.liked_id
+                    WHERE p.game_nickname IS NOT NULL 
+                          AND p.game_nickname != ''
+                          AND p.moderation_status = 'approved'
+                          AND u.is_active = 1
+                          AND (
+                              l.created_at >= datetime('now', '-' || ? || ' days')
+                              OR p.updated_at >= datetime('now', '-' || ? || ' days')
+                          )
+                    ORDER BY p.updated_at DESC
+                    LIMIT 50
+                """, (days, days))
+                
+                rows = await cursor.fetchall()
+                profiles = [row[0] for row in rows if row[0]]
+                
+                logger.debug(f"Найдено {len(profiles)} кандидатов для обновления кеша")
+                return profiles
+                
+        except Exception as e:
+            logger.error(f"Ошибка получения кандидатов для обновления кеша: {e}")
+            return []
