@@ -537,13 +537,7 @@ class SearchHandler:
                     if compatibility and 'total' in compatibility:
                         total_compat = compatibility['total']
                         compat_emoji = "🔥" if total_compat >= 80 else "⭐" if total_compat >= 60 else "👌" if total_compat >= 40 else "🤔"
-                        text += f"\n{compat_emoji} <b>Совместимость:</b> {total_compat}%\n"
-                        
-                        details = compatibility.get('details', {})
-                        text += f"├ ELO: {details.get('elo', 0)}%\n"
-                        text += f"├ Карты: {details.get('maps', 0)}%\n"
-                        text += f"├ Время: {details.get('time', 0)}%\n"
-                        text += f"└ Роль: {details.get('role', 0)}%"
+                        text += f"\n{compat_emoji} <b>Совместимость:</b> {total_compat}%"
                 except Exception as compatibility_error:
                     logger.warning(f"Ошибка расчета совместимости для кандидата {candidate.user_id}: {compatibility_error}")
                     # Не добавляем совместимость при ошибке

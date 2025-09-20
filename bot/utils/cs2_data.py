@@ -362,29 +362,24 @@ def calculate_profile_compatibility(profile1, profile2) -> dict:
     maps_compat = get_maps_compatibility(profile1.favorite_maps, profile2.favorite_maps)
     time_compat = get_time_compatibility(profile1.playtime_slots, profile2.playtime_slots)
     
-    # Совместимость ролей (простая проверка)
-    role_compat = 1.0 if profile1.role != profile2.role else 0.7
-    
-    # Коэффициенты приоритета для разных факторов
+    # Коэффициенты приоритета для разных факторов (роль исключена)
     priority_multipliers = {
         'elo': 2.5,      # ELO получает 2.5x приоритет
         'maps': 1.0,     # Карты остаются как есть
-        'time': 1.2,     # Время получает небольшой бонус
-        'role': 0.8      # Роли получают небольшой штраф
+        'time': 1.0      # Время уменьшено с 1.2 до 1.0
     }
     
     # Применяем мультипликаторы к совместимости
     weighted_elo = elo_compat * priority_multipliers['elo']
     weighted_maps = maps_compat * priority_multipliers['maps']
     weighted_time = time_compat * priority_multipliers['time']
-    weighted_role = role_compat * priority_multipliers['role']
     
     # Суммируем взвешенные значения
-    total_weighted = weighted_elo + weighted_maps + weighted_time + weighted_role
+    total_weighted = weighted_elo + weighted_maps + weighted_time
     
-    # Нормализуем результат (максимально возможное значение = 5.5)
+    # Нормализуем результат (максимально возможное значение = 4.5)
     max_possible = 1.0 * (priority_multipliers['elo'] + priority_multipliers['maps'] + 
-                         priority_multipliers['time'] + priority_multipliers['role'])
+                         priority_multipliers['time'])
     total_compatibility = total_weighted / max_possible
     
     return {
@@ -392,8 +387,7 @@ def calculate_profile_compatibility(profile1, profile2) -> dict:
         'details': {
             'elo': round(elo_compat * 100),
             'maps': round(maps_compat * 100),
-            'time': round(time_compat * 100),
-            'role': round(role_compat * 100)
+            'time': round(time_compat * 100)
         }
     }
 
