@@ -329,6 +329,10 @@ class SecureLogger:
     def debug(self, message: str, *args, **kwargs) -> None:
         """Безопасное логирование уровня DEBUG"""
         self.safe_log(logging.DEBUG, message, *args, **kwargs)
+    
+    def critical(self, message: str, *args, **kwargs) -> None:
+        """Безопасное логирование уровня CRITICAL"""
+        self.safe_log(logging.CRITICAL, message, *args, **kwargs)
 
 
 class SecurityValidator:
