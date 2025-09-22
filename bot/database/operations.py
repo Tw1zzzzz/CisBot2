@@ -7,7 +7,7 @@ import logging
 import aiosqlite
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 import sqlite3
 import time
@@ -467,6 +467,38 @@ class DatabaseManager:
                 FOREIGN KEY (appointed_by) REFERENCES users (user_id)
             )
         """)
+        
+        # Таблица аудита административных действий
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS admin_audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_user_id INTEGER NOT NULL,
+                action_type TEXT NOT NULL,
+                target_user_id INTEGER,
+                details TEXT,
+                ip_address TEXT,
+                user_agent TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (admin_user_id) REFERENCES users (user_id),
+                FOREIGN KEY (target_user_id) REFERENCES users (user_id)
+            )
+        """)
+        
+        # Таблица подтверждений критических операций
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS admin_confirmations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                admin_user_id INTEGER NOT NULL,
+                action_type TEXT NOT NULL,
+                target_user_id INTEGER,
+                confirmation_token TEXT NOT NULL UNIQUE,
+                expires_at TIMESTAMP NOT NULL,
+                is_used BOOLEAN DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (admin_user_id) REFERENCES users (user_id),
+                FOREIGN KEY (target_user_id) REFERENCES users (user_id)
+            )
+        """)
 
     async def _create_indexes(self, db: aiosqlite.Connection):
         """Создает индексы для оптимизации запросов"""
@@ -479,7 +511,13 @@ class DatabaseManager:
             "CREATE INDEX IF NOT EXISTS idx_likes_viewed ON likes (viewed_at)",
             "CREATE INDEX IF NOT EXISTS idx_matches_users ON matches (user1_id, user2_id)",
             "CREATE INDEX IF NOT EXISTS idx_matches_active ON matches (is_active)",
-            "CREATE INDEX IF NOT EXISTS idx_moderators_active ON moderators (is_active)"
+            "CREATE INDEX IF NOT EXISTS idx_moderators_active ON moderators (is_active)",
+            "CREATE INDEX IF NOT EXISTS idx_admin_audit_admin ON admin_audit_log (admin_user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_admin_audit_action ON admin_audit_log (action_type)",
+            "CREATE INDEX IF NOT EXISTS idx_admin_audit_created ON admin_audit_log (created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_admin_confirmations_token ON admin_confirmations (confirmation_token)",
+            "CREATE INDEX IF NOT EXISTS idx_admin_confirmations_admin ON admin_confirmations (admin_user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_admin_confirmations_expires ON admin_confirmations (expires_at)"
         ]
         
         for index_sql in indexes:
@@ -881,15 +919,30 @@ class DatabaseManager:
                 return True  # Настройки по умолчанию - видимый всем
             
             # 🔥 ИСПРАВЛЕНИЕ: Безопасный парсинг JSON с валидацией
-            import json
-            try:
-                privacy_settings = json.loads(privacy_settings_json)
-                if not isinstance(privacy_settings, dict):
-                    logger.warning(f"Настройки приватности не являются dict для кандидата {candidate_id}")
-                    return True  # По умолчанию показываем при некорректных данных
-            except (json.JSONDecodeError, TypeError) as json_error:
-                logger.warning(f"Ошибка парсинга JSON настроек приватности для кандидата {candidate_id}: {json_error}")
-                return True  # По умолчанию показываем при ошибке парсинга
+            from ..utils.security_validator import security_validator
+            secure_logger = security_validator.get_secure_logger(__name__)
+            
+            # Схема валидации для настроек приватности
+            privacy_schema = {
+                "type": "object",
+                "properties": {
+                    "profile_visibility": {"type": "string", "enum": ["public", "private", "friends"]},
+                    "data_sharing": {"type": "boolean"},
+                    "notifications": {"type": "object"}
+                }
+            }
+            
+            parsed_data, validation_result = security_validator.safe_json_loads(
+                privacy_settings_json, 
+                schema=privacy_schema, 
+                default={}
+            )
+            
+            if validation_result.is_valid:
+                privacy_settings = parsed_data
+            else:
+                secure_logger.warning(f"Ошибка валидации настроек приватности для кандидата {candidate_id}: {validation_result.error_message}")
+                return True  # По умолчанию показываем при некорректных данных
             
             # 🔥 ИСПРАВЛЕНИЕ: Безопасное получение настройки видимости с валидацией
             visibility = privacy_settings.get('profile_visibility', 'all')
@@ -1953,3 +2006,239 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Ошибка получения кандидатов для обновления кеша: {e}")
             return []
+
+    # === SECURITY AUDIT SYSTEM ===
+
+    async def log_admin_action(self, admin_user_id: int, action_type: str, target_user_id: Optional[int] = None, 
+                              details: Optional[str] = None, ip_address: Optional[str] = None, 
+                              user_agent: Optional[str] = None) -> bool:
+        """
+        Логирует административное действие в аудит
+        
+        Args:
+            admin_user_id: ID администратора, выполняющего действие
+            action_type: Тип действия (add_moderator, remove_moderator, etc.)
+            target_user_id: ID целевого пользователя (если применимо)
+            details: Дополнительные детали действия
+            ip_address: IP адрес администратора
+            user_agent: User-Agent администратора
+            
+        Returns:
+            bool: True если логирование прошло успешно
+        """
+        try:
+            async with self.acquire_connection() as db:
+                await db.execute("""
+                    INSERT INTO admin_audit_log 
+                    (admin_user_id, action_type, target_user_id, details, ip_address, user_agent, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (admin_user_id, action_type, target_user_id, details, ip_address, user_agent, datetime.now()))
+                await db.commit()
+                
+                logger.info(f"SECURITY AUDIT: {action_type} by admin {admin_user_id} on target {target_user_id}")
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка логирования административного действия: {e}")
+            return False
+
+    async def get_admin_audit_log(self, admin_user_id: Optional[int] = None, action_type: Optional[str] = None, 
+                                 limit: int = 100, offset: int = 0) -> List[Dict]:
+        """
+        Получает лог административных действий
+        
+        Args:
+            admin_user_id: Фильтр по ID администратора
+            action_type: Фильтр по типу действия
+            limit: Максимальное количество записей
+            offset: Смещение для пагинации
+            
+        Returns:
+            List[Dict]: Список записей аудита
+        """
+        try:
+            async with self.acquire_connection() as db:
+                db.row_factory = aiosqlite.Row
+                
+                query = "SELECT * FROM admin_audit_log WHERE 1=1"
+                params = []
+                
+                if admin_user_id:
+                    query += " AND admin_user_id = ?"
+                    params.append(admin_user_id)
+                
+                if action_type:
+                    query += " AND action_type = ?"
+                    params.append(action_type)
+                
+                query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+                
+                cursor = await db.execute(query, params)
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"Ошибка получения лога аудита: {e}")
+            return []
+
+    async def create_confirmation_token(self, admin_user_id: int, action_type: str, 
+                                      target_user_id: Optional[int] = None, 
+                                      expires_minutes: int = 15) -> Optional[str]:
+        """
+        Создает токен подтверждения для критической операции
+        
+        Args:
+            admin_user_id: ID администратора
+            action_type: Тип действия
+            target_user_id: ID целевого пользователя
+            expires_minutes: Время жизни токена в минутах
+            
+        Returns:
+            Optional[str]: Токен подтверждения или None при ошибке
+        """
+        try:
+            import secrets
+            import hashlib
+            
+            # Генерируем криптографически стойкий токен
+            token = secrets.token_urlsafe(32)
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            
+            expires_at = datetime.now() + timedelta(minutes=expires_minutes)
+            
+            async with self.acquire_connection() as db:
+                await db.execute("""
+                    INSERT INTO admin_confirmations 
+                    (admin_user_id, action_type, target_user_id, confirmation_token, expires_at, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (admin_user_id, action_type, target_user_id, token_hash, expires_at, datetime.now()))
+                await db.commit()
+                
+                logger.info(f"SECURITY: Создан токен подтверждения для {action_type} администратором {admin_user_id}")
+                return token
+        except Exception as e:
+            logger.error(f"Ошибка создания токена подтверждения: {e}")
+            return None
+
+    async def verify_confirmation_token(self, token: str, admin_user_id: int, action_type: str) -> bool:
+        """
+        Проверяет токен подтверждения
+        
+        Args:
+            token: Токен для проверки
+            admin_user_id: ID администратора
+            action_type: Тип действия
+            
+        Returns:
+            bool: True если токен валиден
+        """
+        try:
+            import hashlib
+            
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            
+            async with self.acquire_connection() as db:
+                cursor = await db.execute("""
+                    SELECT id, target_user_id FROM admin_confirmations 
+                    WHERE confirmation_token = ? 
+                    AND admin_user_id = ? 
+                    AND action_type = ?
+                    AND expires_at > ?
+                    AND is_used = 0
+                """, (token_hash, admin_user_id, action_type, datetime.now()))
+                
+                row = await cursor.fetchone()
+                if row:
+                    # Помечаем токен как использованный
+                    await db.execute("""
+                        UPDATE admin_confirmations 
+                        SET is_used = 1 
+                        WHERE id = ?
+                    """, (row[0],))
+                    await db.commit()
+                    
+                    logger.info(f"SECURITY: Токен подтверждения валиден для {action_type} администратором {admin_user_id}")
+                    return True
+                else:
+                    logger.warning(f"SECURITY: Невалидный токен подтверждения для {action_type} администратором {admin_user_id}")
+                    return False
+        except Exception as e:
+            logger.error(f"Ошибка проверки токена подтверждения: {e}")
+            return False
+
+    async def cleanup_expired_confirmations(self) -> int:
+        """
+        Очищает истекшие токены подтверждения
+        
+        Returns:
+            int: Количество удаленных токенов
+        """
+        try:
+            async with self.acquire_connection() as db:
+                cursor = await db.execute("""
+                    DELETE FROM admin_confirmations 
+                    WHERE expires_at < ?
+                """, (datetime.now(),))
+                await db.commit()
+                
+                deleted_count = cursor.rowcount
+                if deleted_count > 0:
+                    logger.info(f"SECURITY: Удалено {deleted_count} истекших токенов подтверждения")
+                return deleted_count
+        except Exception as e:
+            logger.error(f"Ошибка очистки истекших токенов: {e}")
+            return 0
+
+    async def get_admin_action_stats(self, admin_user_id: Optional[int] = None, days: int = 30) -> Dict:
+        """
+        Получает статистику административных действий
+        
+        Args:
+            admin_user_id: ID администратора (если None - общая статистика)
+            days: Количество дней для анализа
+            
+        Returns:
+            Dict: Статистика действий
+        """
+        try:
+            async with self.acquire_connection() as db:
+                stats = {}
+                
+                # Базовый запрос
+                base_query = """
+                    SELECT action_type, COUNT(*) as count
+                    FROM admin_audit_log 
+                    WHERE created_at >= datetime('now', '-' || ? || ' days')
+                """
+                params = [days]
+                
+                if admin_user_id:
+                    base_query += " AND admin_user_id = ?"
+                    params.append(admin_user_id)
+                
+                base_query += " GROUP BY action_type"
+                
+                cursor = await db.execute(base_query, params)
+                rows = await cursor.fetchall()
+                
+                for row in rows:
+                    stats[row[0]] = row[1]
+                
+                # Общее количество действий
+                total_query = """
+                    SELECT COUNT(*) FROM admin_audit_log 
+                    WHERE created_at >= datetime('now', '-' || ? || ' days')
+                """
+                total_params = [days]
+                
+                if admin_user_id:
+                    total_query += " AND admin_user_id = ?"
+                    total_params.append(admin_user_id)
+                
+                cursor = await db.execute(total_query, total_params)
+                total_row = await cursor.fetchone()
+                stats['total_actions'] = total_row[0] if total_row else 0
+                
+                return stats
+        except Exception as e:
+            logger.error(f"Ошибка получения статистики административных действий: {e}")
+            return {}

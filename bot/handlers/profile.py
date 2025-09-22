@@ -17,6 +17,7 @@ from bot.utils.background_processor import TaskPriority
 from bot.utils.progressive_loader import get_progressive_loader
 from bot.utils.notifications import NotificationManager
 from bot.database.operations import DatabaseManager
+from bot.utils.callback_security import sanitize_text_input
 
 logger = logging.getLogger(__name__)
 
@@ -564,7 +565,8 @@ class ProfileHandler:
 
     async def handle_nickname_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обрабатывает ввод игрового ника"""
-        nickname = update.message.text.strip()
+        # Санитизация пользовательского ввода
+        nickname = sanitize_text_input(update.message.text.strip(), max_length=50)
         
         # Валидация ника
         if len(nickname) < 2:
@@ -652,7 +654,8 @@ class ProfileHandler:
 
     async def handle_exact_elo_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обрабатывает ввод точного ELO при создании профиля"""
-        text = update.message.text.strip()
+        # Санитизация пользовательского ввода
+        text = sanitize_text_input(update.message.text.strip(), max_length=10)
         
         # Проверяем на точное ELO
         if text.isdigit():
@@ -698,7 +701,8 @@ class ProfileHandler:
     async def handle_faceit_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обрабатывает ввод ссылки на Faceit"""
         if update.message:
-            text = update.message.text.strip()
+            # Санитизация пользовательского ввода
+            text = sanitize_text_input(update.message.text.strip(), max_length=200)
             
             # Проверяем на ссылку Faceit
             if validate_faceit_url(text):
@@ -1030,8 +1034,8 @@ class ProfileHandler:
                 return SELECTING_CATEGORIES
         
         elif update.message:
-            # Получен текст описания
-            description = update.message.text.strip()
+            # Получен текст описания с санитизацией
+            description = sanitize_text_input(update.message.text.strip(), max_length=500)
             
             if len(description) > 500:
                 await update.message.reply_text(
@@ -2555,7 +2559,8 @@ class ProfileHandler:
     async def handle_profile_edit_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Универсальный обработчик текстового ввода при редактировании профиля"""
         user_id = update.effective_user.id
-        text = update.message.text.strip()
+        # Санитизация пользовательского ввода
+        text = sanitize_text_input(update.message.text.strip(), max_length=100)
         
         # Обработка ввода ELO
         if context.user_data.get('awaiting_elo_input') and context.user_data.get('editing_field') == 'faceit_elo':

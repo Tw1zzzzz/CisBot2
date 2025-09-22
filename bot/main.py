@@ -20,6 +20,8 @@ from .utils.background_processor import get_background_processor
 from .utils.progressive_loader import initialize_progressive_loader, get_progressive_loader
 from .utils.faceit_cache import FaceitCacheManager
 from .utils.performance_monitor import PerformanceMonitor
+from .utils.rate_limiter import rate_limiter
+from .utils.security_middleware import security_middleware
 from .database.operations import DatabaseManager
 from .handlers.start import StartHandler
 from .handlers.profile import ProfileHandler, ENTERING_NICKNAME, SELECTING_ELO, ENTERING_FACEIT_URL, SELECTING_ROLE, SELECTING_MAPS, SELECTING_PLAYTIME, SELECTING_CATEGORIES, ENTERING_DESCRIPTION, SELECTING_MEDIA, EDITING_MEDIA_TYPE
@@ -50,6 +52,10 @@ class CS2TeammeetBot:
         
         logger.info("Инициализация Cache Manager...")
         self.cache_manager = FaceitCacheManager()
+        
+        logger.info("Инициализация Security Systems...")
+        self.rate_limiter = rate_limiter
+        self.security_middleware = security_middleware
         
         logger.info("Создание Telegram Application...")
         self.application = (
@@ -151,6 +157,10 @@ class CS2TeammeetBot:
             # Stop cache manager gracefully
             await self.cache_manager.shutdown()
             logger.info("Cache manager остановлен успешно")
+            
+            # Stop security systems
+            await self.rate_limiter.shutdown()
+            logger.info("Security systems остановлены успешно")
             
             await self.db.disconnect()
             logger.info("Пул соединений закрыт")
@@ -305,6 +315,12 @@ class CS2TeammeetBot:
         self.application.add_handler(CommandHandler("add_moderator", moderation_handler_instance.add_moderator_command))
         self.application.add_handler(CommandHandler("remove_moderator", moderation_handler_instance.remove_moderator_command))
         self.application.add_handler(CommandHandler("list_moderators", moderation_handler_instance.list_moderators_command))
+        
+        # Команды безопасности
+        self.application.add_handler(CommandHandler("security_stats", moderation_handler_instance.security_stats_command))
+        self.application.add_handler(CommandHandler("user_security", moderation_handler_instance.user_security_command))
+        self.application.add_handler(CommandHandler("security_events", moderation_handler_instance.security_events_command))
+        self.application.add_handler(CommandHandler("unblock_user", moderation_handler_instance.unblock_user_command))
 
         # === CONVERSATION HANDLERS ===
         self.application.add_handler(profile_creation_handler)

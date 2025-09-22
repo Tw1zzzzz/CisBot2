@@ -17,8 +17,10 @@ import sqlite3
 import os
 
 from ..config import Config
+from .security_validator import security_validator
 
 logger = logging.getLogger(__name__)
+secure_logger = security_validator.get_secure_logger(__name__)
 
 @dataclass
 class CacheEntry:
@@ -354,8 +356,30 @@ class FaceitCacheManager:
                         except Exception as e:
                             logger.debug(f"Error updating cache performance metrics: {e}")
                     
-                    logger.debug(f"Cache hit for {nickname}:{data_type} (access_count: {access_count + 1})")
-                    return json.loads(data_json)
+                    secure_logger.debug(f"Cache hit for {nickname}:{data_type} (access_count: {access_count + 1})")
+                    
+                    # Безопасный парсинг JSON данных из кеша
+                    faceit_data_schema = {
+                        "type": "object",
+                        "properties": {
+                            "player_id": {"type": "string"},
+                            "nickname": {"type": "string"},
+                            "games": {"type": "object"},
+                            "stats": {"type": "object"}
+                        }
+                    }
+                    
+                    parsed_data, validation_result = security_validator.safe_json_loads(
+                        data_json, 
+                        schema=faceit_data_schema, 
+                        default=None
+                    )
+                    
+                    if validation_result.is_valid:
+                        return parsed_data
+                    else:
+                        secure_logger.error(f"Ошибка валидации кешированных данных для {nickname}:{data_type}: {validation_result.error_message}")
+                        return None
                     
                 else:
                     # Cache miss
@@ -376,7 +400,7 @@ class FaceitCacheManager:
                         except Exception as e:
                             logger.debug(f"Error updating cache performance metrics: {e}")
                     
-                    logger.debug(f"Cache miss for {nickname}:{data_type}")
+                    secure_logger.debug(f"Cache miss for {nickname}:{data_type}")
                     return None
                     
         except Exception as e:
@@ -398,6 +422,13 @@ class FaceitCacheManager:
             
             async with self.db_manager.acquire_connection(db_type='cache') as conn:
                 # Insert or update cache entry
+                # Безопасная сериализация данных в JSON
+                try:
+                    json_data = json.dumps(data, ensure_ascii=False, separators=(',', ':'))
+                except (TypeError, ValueError) as e:
+                    secure_logger.error(f"Ошибка сериализации данных для {nickname}:{data_type}: {e}")
+                    return False
+                
                 await conn.execute("""
                     INSERT OR REPLACE INTO faceit_cache 
                     (nickname, data_type, data, created_at, accessed_at, access_count, 
@@ -406,7 +437,7 @@ class FaceitCacheManager:
                            COALESCE((SELECT access_count FROM faceit_cache 
                                    WHERE nickname = ? AND data_type = ?), 0) + 1,
                            ?, ?, ?)
-                """, (nickname, data_type, json.dumps(data), nickname, data_type,
+                """, (nickname, data_type, json_data, nickname, data_type,
                       last_match_date, is_active, ttl_seconds))
                 
                 await conn.commit()
@@ -523,8 +554,18 @@ class FaceitCacheManager:
                     
                     row = await cursor.fetchone()
                     if row:
-                        results[(nickname, data_type)] = json.loads(row[0])
-                        self._stats['hits'] += 1
+                        # Безопасный парсинг JSON данных
+                        parsed_data, validation_result = security_validator.safe_json_loads(
+                            row[0], 
+                            default=None
+                        )
+                        if validation_result.is_valid:
+                            results[(nickname, data_type)] = parsed_data
+                            self._stats['hits'] += 1
+                        else:
+                            secure_logger.error(f"Ошибка валидации данных в batch get для {nickname}:{data_type}: {validation_result.error_message}")
+                            results[(nickname, data_type)] = None
+                            self._stats['misses'] += 1
                     else:
                         results[(nickname, data_type)] = None
                         self._stats['misses'] += 1

@@ -9,6 +9,10 @@ from telegram.ext import ContextTypes
 from bot.database.operations import DatabaseManager
 from bot.utils.cs2_data import format_elo_display, format_role_display, extract_faceit_nickname, PLAYTIME_OPTIONS
 from bot.utils.background_processor import TaskPriority
+from bot.utils.callback_security import safe_parse_user_id, safe_parse_string_value, sanitize_text_input
+from bot.utils.enhanced_callback_security import validate_secure_callback, CallbackValidationResult
+from bot.utils.rate_limiter import get_user_security_stats, get_system_security_stats, get_recent_security_events
+from bot.utils.security_middleware import get_user_security_report, get_security_summary
 
 logger = logging.getLogger(__name__)
 
@@ -200,23 +204,63 @@ class ModerationHandler:
         
         # Карты
         try:
-            import json
-            maps = json.loads(profile_data['favorite_maps'])
-            text += f"🗺️ <b>Карты:</b> {', '.join(maps[:3])}{'...' if len(maps) > 3 else ''}\n"
-        except:
+            from ..utils.security_validator import security_validator
+            secure_logger = security_validator.get_secure_logger(__name__)
+            
+            # Схема валидации для списка карт
+            maps_schema = {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 50
+            }
+            
+            parsed_data, validation_result = security_validator.safe_json_loads(
+                profile_data['favorite_maps'], 
+                schema=maps_schema, 
+                default=[]
+            )
+            
+            if validation_result.is_valid:
+                maps = parsed_data
+                text += f"🗺️ <b>Карты:</b> {', '.join(maps[:3])}{'...' if len(maps) > 3 else ''}\n"
+            else:
+                secure_logger.warning(f"Ошибка валидации карт в профиле {profile_data.get('user_id', 'unknown')}: {validation_result.error_message}")
+                text += f"🗺️ <b>Карты:</b> Ошибка данных\n"
+        except Exception as e:
+            secure_logger.error(f"Ошибка обработки карт в профиле: {e}")
             text += f"🗺️ <b>Карты:</b> Ошибка данных\n"
         
         # Время игры
         try:
-            import json
-            slots = json.loads(profile_data['playtime_slots'])
-            time_names = []
-            for slot_id in slots:
-                time_option = next((t for t in PLAYTIME_OPTIONS if t['id'] == slot_id), None)
-                if time_option:
-                    time_names.append(time_option['emoji'])
-            text += f"⏰ <b>Время:</b> {' '.join(time_names)}\n"
-        except:
+            from ..utils.security_validator import security_validator
+            secure_logger = security_validator.get_secure_logger(__name__)
+            
+            # Схема валидации для временных слотов
+            slots_schema = {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 20
+            }
+            
+            parsed_data, validation_result = security_validator.safe_json_loads(
+                profile_data['playtime_slots'], 
+                schema=slots_schema, 
+                default=[]
+            )
+            
+            if validation_result.is_valid:
+                slots = parsed_data
+                time_names = []
+                for slot_id in slots:
+                    time_option = next((t for t in PLAYTIME_OPTIONS if t['id'] == slot_id), None)
+                    if time_option:
+                        time_names.append(time_option['emoji'])
+                text += f"⏰ <b>Время:</b> {' '.join(time_names)}\n"
+            else:
+                secure_logger.warning(f"Ошибка валидации временных слотов в профиле {profile_data.get('user_id', 'unknown')}: {validation_result.error_message}")
+                text += f"⏰ <b>Время:</b> Ошибка данных\n"
+        except Exception as e:
+            secure_logger.error(f"Ошибка обработки временных слотов в профиле: {e}")
             text += f"⏰ <b>Время:</b> Ошибка данных\n"
         
         if profile_data['description']:
@@ -237,18 +281,35 @@ class ModerationHandler:
         query = update.callback_query
         await query.answer("✅ Профиль одобрен!")
         
-        user_id = int(query.data.split('_')[1])
+        # Безопасный парсинг user_id
+        user_id_result = safe_parse_user_id(query.data, "approve_")
+        if not user_id_result.is_valid:
+            logger.error(f"Небезопасный callback_data в approve_profile: {query.data} - {user_id_result.error_message}")
+            await query.answer("❌ Ошибка валидации данных")
+            return
+        
+        user_id = user_id_result.parsed_data['user_id']
         moderator_id = query.from_user.id
+        
+        # 🔒 ENHANCED SECURITY: Проверка прав модератора
+        if not await self.db.is_moderator(moderator_id):
+            await self._log_security_event(moderator_id, "approve_profile_attempt", "unauthorized", target_user_id=user_id)
+            await query.edit_message_text("❌ У вас нет прав модератора")
+            return
         
         success = await self.db.moderate_profile(user_id, 'approved', moderator_id)
         
         if success:
+            # 🔒 ENHANCED SECURITY: Логируем успешное одобрение
+            await self._log_security_event(moderator_id, "approve_profile", "success", target_user_id=user_id)
+            
             # Отправляем уведомление пользователю
             await self.send_moderation_notification(user_id, 'approved', context)
             
             # Показываем следующую анкету
             await self.show_next_profile(query, context)
         else:
+            await self._log_security_event(moderator_id, "approve_profile", "database_error", target_user_id=user_id)
             await query.edit_message_text("❌ Ошибка при одобрении профиля")
 
     async def reject_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -256,7 +317,14 @@ class ModerationHandler:
         query = update.callback_query
         await query.answer()
         
-        user_id = int(query.data.split('_')[1])
+        # Безопасный парсинг user_id
+        user_id_result = safe_parse_user_id(query.data, "reject_")
+        if not user_id_result.is_valid:
+            logger.error(f"Небезопасный callback_data в reject_profile: {query.data} - {user_id_result.error_message}")
+            await query.answer("❌ Ошибка валидации данных")
+            return
+        
+        user_id = user_id_result.parsed_data['user_id']
         context.user_data['rejecting_user_id'] = user_id
         
         text = "❌ <b>Отклонение анкеты</b>\n\n"
@@ -288,7 +356,14 @@ class ModerationHandler:
             'incomplete': 'Неполная или недостоверная информация'
         }
         
-        reason_key = query.data.split('_')[-1]
+        # Безопасный парсинг reason_key
+        reason_result = safe_parse_string_value(query.data, "reject_reason_")
+        if not reason_result.is_valid:
+            logger.error(f"Небезопасный callback_data в reject_with_reason: {query.data} - {reason_result.error_message}")
+            await query.answer("❌ Ошибка валидации данных")
+            return
+        
+        reason_key = reason_result.parsed_data['value']
         
         if reason_key == 'custom':
             # Запрашиваем кастомную причину
@@ -311,9 +386,19 @@ class ModerationHandler:
         
         reason = reason_map.get(reason_key, 'Нарушение правил сообщества')
         
+        # 🔒 ENHANCED SECURITY: Проверка прав модератора
+        if not await self.db.is_moderator(moderator_id):
+            await self._log_security_event(moderator_id, "reject_profile_attempt", "unauthorized", target_user_id=user_id)
+            await query.edit_message_text("❌ У вас нет прав модератора")
+            return
+        
         success = await self.db.moderate_profile(user_id, 'rejected', moderator_id, reason)
         
         if success:
+            # 🔒 ENHANCED SECURITY: Логируем успешное отклонение
+            await self._log_security_event(moderator_id, "reject_profile", "success", target_user_id=user_id, 
+                                         details=f"Reason: {reason}")
+            
             await query.answer(f"❌ Профиль отклонен: {reason}")
             
             # Отправляем уведомление пользователю
@@ -322,6 +407,7 @@ class ModerationHandler:
             # Показываем следующую анкету
             await self.show_next_profile(query, context)
         else:
+            await self._log_security_event(moderator_id, "reject_profile", "database_error", target_user_id=user_id)
             await query.edit_message_text("❌ Ошибка при отклонении профиля")
 
     async def show_next_profile(self, query_or_update, context):
@@ -383,19 +469,65 @@ class ModerationHandler:
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления пользователю {user_id}: {e}")
 
+    async def _log_security_event(self, admin_user_id: int, action_type: str, event_type: str, 
+                                 target_user_id: Optional[int] = None, details: Optional[str] = None):
+        """
+        Логирует событие безопасности
+        
+        Args:
+            admin_user_id: ID администратора
+            action_type: Тип действия
+            event_type: Тип события (success, failure, attempt, etc.)
+            target_user_id: ID целевого пользователя
+            details: Дополнительные детали
+        """
+        try:
+            # Формируем детали события
+            event_details = f"Event: {event_type}"
+            if details:
+                event_details += f", Details: {details}"
+            
+            # Логируем в аудит
+            await self.db.log_admin_action(
+                admin_user_id=admin_user_id,
+                action_type=f"{action_type}_{event_type}",
+                target_user_id=target_user_id,
+                details=event_details
+            )
+            
+            # Дополнительное логирование в основной лог
+            logger.warning(f"SECURITY EVENT: {action_type}_{event_type} by admin {admin_user_id} on target {target_user_id} - {event_details}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка логирования события безопасности: {e}")
+
 
 
     async def add_moderator_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда для добавления модератора (только для super_admin)"""
         user_id = update.effective_user.id
         
-        # Проверяем права
+        # 🔒 ENHANCED SECURITY: Многоуровневая проверка прав
         moderator = await self.db.get_moderator(user_id)
-        if not moderator or not moderator.can_manage_moderators():
+        if not moderator:
+            await self._log_security_event(user_id, "add_moderator_attempt", "no_moderator_rights")
+            await update.message.reply_text("❌ У вас нет прав модератора.")
+            return
+            
+        if not moderator.can_manage_moderators():
+            await self._log_security_event(user_id, "add_moderator_attempt", "insufficient_permissions", 
+                                         details=f"Role: {moderator.role}")
             await update.message.reply_text(
                 "❌ У вас нет прав для управления модераторами.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Главное меню", callback_data="back_to_main")]])
             )
+            return
+        
+        # 🔒 ENHANCED SECURITY: Проверка на попытку эскалации привилегий
+        if moderator.role != 'super_admin':
+            await self._log_security_event(user_id, "add_moderator_attempt", "privilege_escalation_attempt", 
+                                         details=f"Non-super_admin trying to add moderator: {moderator.role}")
+            await update.message.reply_text("❌ Только супер-администраторы могут добавлять модераторов.")
             return
         
         # Проверяем аргументы команды
@@ -414,19 +546,152 @@ class ModerationHandler:
             return
         
         try:
-            target_user_id = int(context.args[0])
-            role = context.args[1].lower()
+            # Безопасный парсинг user_id из аргументов команды
+            target_user_id_str = context.args[0].strip()
+            if not target_user_id_str.isdigit():
+                await self._log_security_event(user_id, "add_moderator_attempt", "invalid_user_id_format", 
+                                             details=f"Input: {target_user_id_str}")
+                await update.message.reply_text("❌ User ID должен быть числом")
+                return
+            
+            target_user_id = int(target_user_id_str)
+            if not (1 <= target_user_id <= 2**63 - 1):
+                await self._log_security_event(user_id, "add_moderator_attempt", "user_id_out_of_range", 
+                                             details=f"User ID: {target_user_id}")
+                await update.message.reply_text("❌ User ID вне допустимого диапазона")
+                return
+            
+            # 🔒 ENHANCED SECURITY: Проверка на самоповышение
+            if target_user_id == user_id:
+                await self._log_security_event(user_id, "add_moderator_attempt", "self_promotion_attempt")
+                await update.message.reply_text("❌ Нельзя назначать себя модератором")
+                return
+            
+            # Санитизация роли
+            role = sanitize_text_input(context.args[1].lower(), max_length=20)
             
             if role not in ['moderator', 'admin', 'super_admin']:
+                await self._log_security_event(user_id, "add_moderator_attempt", "invalid_role", 
+                                             details=f"Role: {role}")
                 await update.message.reply_text("❌ Неверная роль. Используйте: moderator, admin или super_admin")
                 return
             
-            # Добавляем модератора
+            # 🔒 ENHANCED SECURITY: Проверка на попытку назначить супер-админа
+            if role == 'super_admin':
+                await self._log_security_event(user_id, "add_moderator_attempt", "super_admin_creation_attempt", 
+                                             details=f"Target: {target_user_id}")
+                await update.message.reply_text("❌ Назначение супер-администраторов запрещено через команды")
+                return
+            
+            # 🔒 ENHANCED SECURITY: Проверка существования целевого пользователя
+            target_user = await self.db.get_user(target_user_id)
+            if not target_user:
+                await self._log_security_event(user_id, "add_moderator_attempt", "target_user_not_found", 
+                                             details=f"Target: {target_user_id}")
+                await update.message.reply_text("❌ Пользователь не найден в системе")
+                return
+            
+            # 🔒 ENHANCED SECURITY: Проверка на уже существующего модератора
+            existing_moderator = await self.db.get_moderator(target_user_id)
+            if existing_moderator and existing_moderator.is_active:
+                await self._log_security_event(user_id, "add_moderator_attempt", "duplicate_moderator_attempt", 
+                                             details=f"Target: {target_user_id}, existing role: {existing_moderator.role}")
+                await update.message.reply_text(f"❌ Пользователь уже является активным модератором (роль: {existing_moderator.role})")
+                return
+            
+            # 🔒 ENHANCED SECURITY: Создание токена подтверждения для критической операции
+            confirmation_token = await self.db.create_confirmation_token(
+                user_id, "add_moderator", target_user_id, expires_minutes=10
+            )
+            
+            if not confirmation_token:
+                await self._log_security_event(user_id, "add_moderator_attempt", "confirmation_token_failed")
+                await update.message.reply_text("❌ Ошибка создания подтверждения. Попробуйте позже.")
+                return
+            
+            # Отправляем подтверждение
+            await update.message.reply_text(
+                f"🔒 <b>Подтверждение назначения модератора</b>\n\n"
+                f"<b>Целевой пользователь:</b> {target_user_id} ({target_user.first_name})\n"
+                f"<b>Роль:</b> {role}\n\n"
+                f"⚠️ <b>Это критическая операция!</b>\n"
+                f"Для подтверждения выполните команду:\n"
+                f"<code>/confirm_add_moderator {confirmation_token}</code>\n\n"
+                f"⏰ Токен действителен 10 минут",
+                parse_mode='HTML'
+            )
+            
+            # Логируем создание токена подтверждения
+            await self._log_security_event(user_id, "add_moderator_confirmation_created", 
+                                         target_user_id=target_user_id, details=f"Role: {role}")
+            
+        except ValueError:
+            await self._log_security_event(user_id, "add_moderator_attempt", "value_error")
+            await update.message.reply_text("❌ Неверный ID пользователя")
+        except Exception as e:
+            await self._log_security_event(user_id, "add_moderator_attempt", "exception", details=str(e))
+            logger.error(f"Ошибка добавления модератора: {e}")
+            await update.message.reply_text("❌ Произошла ошибка при добавлении модератора")
+
+    async def confirm_add_moderator_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда подтверждения добавления модератора"""
+        user_id = update.effective_user.id
+        
+        # Проверяем права
+        moderator = await self.db.get_moderator(user_id)
+        if not moderator or not moderator.can_manage_moderators() or moderator.role != 'super_admin':
+            await self._log_security_event(user_id, "confirm_add_moderator_attempt", "unauthorized")
+            await update.message.reply_text("❌ У вас нет прав для подтверждения этой операции.")
+            return
+        
+        if not context.args or len(context.args) < 1:
+            await update.message.reply_text("❌ Укажите токен подтверждения.")
+            return
+        
+        token = context.args[0].strip()
+        
+        # Проверяем токен подтверждения
+        if not await self.db.verify_confirmation_token(token, user_id, "add_moderator"):
+            await self._log_security_event(user_id, "confirm_add_moderator_attempt", "invalid_token", 
+                                         details=f"Token: {token[:10]}...")
+            await update.message.reply_text("❌ Неверный или истекший токен подтверждения.")
+            return
+        
+        # Получаем детали из токена (нужно будет расширить метод для возврата target_user_id)
+        # Пока используем упрощенную логику - получаем последний токен для этого админа
+        try:
+            # Получаем детали операции из лога аудита
+            audit_logs = await self.db.get_admin_audit_log(admin_user_id=user_id, action_type="add_moderator_confirmation_created", limit=1)
+            if not audit_logs:
+                await self._log_security_event(user_id, "confirm_add_moderator_attempt", "no_audit_record")
+                await update.message.reply_text("❌ Не найдена запись о создании токена.")
+                return
+            
+            # Парсим детали из лога
+            details = audit_logs[0].get('details', '')
+            if 'Role:' not in details:
+                await self._log_security_event(user_id, "confirm_add_moderator_attempt", "invalid_audit_details")
+                await update.message.reply_text("❌ Некорректные данные в логе аудита.")
+                return
+            
+            target_user_id = audit_logs[0].get('target_user_id')
+            role = details.split('Role: ')[1] if 'Role: ' in details else 'moderator'
+            
+            if not target_user_id:
+                await self._log_security_event(user_id, "confirm_add_moderator_attempt", "no_target_user_id")
+                await update.message.reply_text("❌ Не найден ID целевого пользователя.")
+                return
+            
+            # Выполняем добавление модератора
             success = await self.db.add_moderator(target_user_id, role, user_id)
             
             if success:
+                # Логируем успешное добавление
+                await self._log_security_event(user_id, "add_moderator_success", target_user_id=target_user_id, 
+                                             details=f"Role: {role}")
+                
                 await update.message.reply_text(
-                    f"✅ Пользователь {target_user_id} назначен как {role}"
+                    f"✅ Пользователь {target_user_id} успешно назначен как {role}"
                 )
                 
                 # Уведомляем нового модератора
@@ -451,22 +716,36 @@ class ModerationHandler:
                 except Exception as e:
                     logger.warning(f"Не удалось уведомить модератора {target_user_id}: {e}")
             else:
-                await update.message.reply_text("❌ Ошибка при добавлении модератора")
+                await self._log_security_event(user_id, "confirm_add_moderator_attempt", "database_error")
+                await update.message.reply_text("❌ Ошибка при добавлении модератора в базу данных.")
                 
-        except ValueError:
-            await update.message.reply_text("❌ Неверный ID пользователя")
         except Exception as e:
-            logger.error(f"Ошибка добавления модератора: {e}")
-            await update.message.reply_text("❌ Произошла ошибка при добавлении модератора")
+            await self._log_security_event(user_id, "confirm_add_moderator_attempt", "exception", details=str(e))
+            logger.error(f"Ошибка подтверждения добавления модератора: {e}")
+            await update.message.reply_text("❌ Произошла ошибка при подтверждении операции.")
 
     async def remove_moderator_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда для удаления модератора"""
         user_id = update.effective_user.id
         
-        # Проверяем права
+        # 🔒 ENHANCED SECURITY: Многоуровневая проверка прав
         moderator = await self.db.get_moderator(user_id)
-        if not moderator or not moderator.can_manage_moderators():
+        if not moderator:
+            await self._log_security_event(user_id, "remove_moderator_attempt", "no_moderator_rights")
+            await update.message.reply_text("❌ У вас нет прав модератора.")
+            return
+            
+        if not moderator.can_manage_moderators():
+            await self._log_security_event(user_id, "remove_moderator_attempt", "insufficient_permissions", 
+                                         details=f"Role: {moderator.role}")
             await update.message.reply_text("❌ У вас нет прав для управления модераторами.")
+            return
+        
+        # 🔒 ENHANCED SECURITY: Проверка на попытку эскалации привилегий
+        if moderator.role != 'super_admin':
+            await self._log_security_event(user_id, "remove_moderator_attempt", "privilege_escalation_attempt", 
+                                         details=f"Non-super_admin trying to remove moderator: {moderator.role}")
+            await update.message.reply_text("❌ Только супер-администраторы могут удалять модераторов.")
             return
         
         if not context.args or len(context.args) < 1:
@@ -480,12 +759,127 @@ class ModerationHandler:
             return
         
         try:
-            target_user_id = int(context.args[0])
+            # Безопасный парсинг user_id из аргументов команды
+            target_user_id_str = context.args[0].strip()
+            if not target_user_id_str.isdigit():
+                await self._log_security_event(user_id, "remove_moderator_attempt", "invalid_user_id_format", 
+                                             details=f"Input: {target_user_id_str}")
+                await update.message.reply_text("❌ User ID должен быть числом")
+                return
             
-            # Удаляем модератора (деактивируем)
+            target_user_id = int(target_user_id_str)
+            if not (1 <= target_user_id <= 2**63 - 1):
+                await self._log_security_event(user_id, "remove_moderator_attempt", "user_id_out_of_range", 
+                                             details=f"User ID: {target_user_id}")
+                await update.message.reply_text("❌ User ID вне допустимого диапазона")
+                return
+            
+            # 🔒 ENHANCED SECURITY: Проверка на самоудаление
+            if target_user_id == user_id:
+                await self._log_security_event(user_id, "remove_moderator_attempt", "self_removal_attempt")
+                await update.message.reply_text("❌ Нельзя удалить самого себя")
+                return
+            
+            # 🔒 ENHANCED SECURITY: Проверка существования целевого модератора
+            target_moderator = await self.db.get_moderator(target_user_id)
+            if not target_moderator:
+                await self._log_security_event(user_id, "remove_moderator_attempt", "target_not_moderator", 
+                                             details=f"Target: {target_user_id}")
+                await update.message.reply_text("❌ Пользователь не является модератором")
+                return
+            
+            if not target_moderator.is_active:
+                await self._log_security_event(user_id, "remove_moderator_attempt", "target_already_inactive", 
+                                             details=f"Target: {target_user_id}")
+                await update.message.reply_text("❌ Модератор уже деактивирован")
+                return
+            
+            # 🔒 ENHANCED SECURITY: Проверка на удаление супер-админа
+            if target_moderator.role == 'super_admin':
+                await self._log_security_event(user_id, "remove_moderator_attempt", "super_admin_removal_attempt", 
+                                             details=f"Target: {target_user_id}")
+                await update.message.reply_text("❌ Удаление супер-администраторов запрещено")
+                return
+            
+            # 🔒 ENHANCED SECURITY: Создание токена подтверждения для критической операции
+            confirmation_token = await self.db.create_confirmation_token(
+                user_id, "remove_moderator", target_user_id, expires_minutes=10
+            )
+            
+            if not confirmation_token:
+                await self._log_security_event(user_id, "remove_moderator_attempt", "confirmation_token_failed")
+                await update.message.reply_text("❌ Ошибка создания подтверждения. Попробуйте позже.")
+                return
+            
+            # Отправляем подтверждение
+            await update.message.reply_text(
+                f"🔒 <b>Подтверждение удаления модератора</b>\n\n"
+                f"<b>Целевой модератор:</b> {target_user_id}\n"
+                f"<b>Роль:</b> {target_moderator.role}\n\n"
+                f"⚠️ <b>Это критическая операция!</b>\n"
+                f"Для подтверждения выполните команду:\n"
+                f"<code>/confirm_remove_moderator {confirmation_token}</code>\n\n"
+                f"⏰ Токен действителен 10 минут",
+                parse_mode='HTML'
+            )
+            
+            # Логируем создание токена подтверждения
+            await self._log_security_event(user_id, "remove_moderator_confirmation_created", 
+                                         target_user_id=target_user_id, details=f"Role: {target_moderator.role}")
+            
+        except ValueError:
+            await self._log_security_event(user_id, "remove_moderator_attempt", "value_error")
+            await update.message.reply_text("❌ Неверный ID пользователя")
+        except Exception as e:
+            await self._log_security_event(user_id, "remove_moderator_attempt", "exception", details=str(e))
+            logger.error(f"Ошибка удаления модератора: {e}")
+            await update.message.reply_text("❌ Произошла ошибка при удалении модератора")
+
+    async def confirm_remove_moderator_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда подтверждения удаления модератора"""
+        user_id = update.effective_user.id
+        
+        # Проверяем права
+        moderator = await self.db.get_moderator(user_id)
+        if not moderator or not moderator.can_manage_moderators() or moderator.role != 'super_admin':
+            await self._log_security_event(user_id, "confirm_remove_moderator_attempt", "unauthorized")
+            await update.message.reply_text("❌ У вас нет прав для подтверждения этой операции.")
+            return
+        
+        if not context.args or len(context.args) < 1:
+            await update.message.reply_text("❌ Укажите токен подтверждения.")
+            return
+        
+        token = context.args[0].strip()
+        
+        # Проверяем токен подтверждения
+        if not await self.db.verify_confirmation_token(token, user_id, "remove_moderator"):
+            await self._log_security_event(user_id, "confirm_remove_moderator_attempt", "invalid_token", 
+                                         details=f"Token: {token[:10]}...")
+            await update.message.reply_text("❌ Неверный или истекший токен подтверждения.")
+            return
+        
+        try:
+            # Получаем детали операции из лога аудита
+            audit_logs = await self.db.get_admin_audit_log(admin_user_id=user_id, action_type="remove_moderator_confirmation_created", limit=1)
+            if not audit_logs:
+                await self._log_security_event(user_id, "confirm_remove_moderator_attempt", "no_audit_record")
+                await update.message.reply_text("❌ Не найдена запись о создании токена.")
+                return
+            
+            target_user_id = audit_logs[0].get('target_user_id')
+            if not target_user_id:
+                await self._log_security_event(user_id, "confirm_remove_moderator_attempt", "no_target_user_id")
+                await update.message.reply_text("❌ Не найден ID целевого пользователя.")
+                return
+            
+            # Выполняем удаление модератора (деактивацию)
             success = await self.db.update_moderator_status(target_user_id, False)
             
             if success:
+                # Логируем успешное удаление
+                await self._log_security_event(user_id, "remove_moderator_success", target_user_id=target_user_id)
+                
                 await update.message.reply_text(f"✅ Модератор {target_user_id} деактивирован")
                 
                 # Уведомляем бывшего модератора
@@ -498,13 +892,13 @@ class ModerationHandler:
                 except Exception as e:
                     logger.warning(f"Не удалось уведомить бывшего модератора {target_user_id}: {e}")
             else:
-                await update.message.reply_text("❌ Ошибка при удалении модератора")
+                await self._log_security_event(user_id, "confirm_remove_moderator_attempt", "database_error")
+                await update.message.reply_text("❌ Ошибка при удалении модератора из базы данных.")
                 
-        except ValueError:
-            await update.message.reply_text("❌ Неверный ID пользователя")
         except Exception as e:
-            logger.error(f"Ошибка удаления модератора: {e}")
-            await update.message.reply_text("❌ Произошла ошибка при удалении модератора")
+            await self._log_security_event(user_id, "confirm_remove_moderator_attempt", "exception", details=str(e))
+            logger.error(f"Ошибка подтверждения удаления модератора: {e}")
+            await update.message.reply_text("❌ Произошла ошибка при подтверждении операции.")
 
     async def list_moderators_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда для просмотра списка модераторов"""
@@ -531,11 +925,478 @@ class ModerationHandler:
         
         await update.message.reply_text(text, parse_mode='HTML')
 
+    async def audit_log_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда для просмотра лога аудита (только для super_admin)"""
+        user_id = update.effective_user.id
+        
+        # 🔒 ENHANCED SECURITY: Проверка прав
+        moderator = await self.db.get_moderator(user_id)
+        if not moderator or moderator.role != 'super_admin':
+            await self._log_security_event(user_id, "audit_log_attempt", "unauthorized")
+            await update.message.reply_text("❌ У вас нет прав для просмотра лога аудита.")
+            return
+        
+        # Получаем параметры команды
+        limit = 20
+        if context.args and len(context.args) > 0:
+            try:
+                limit = min(int(context.args[0]), 100)  # Максимум 100 записей
+            except ValueError:
+                await update.message.reply_text("❌ Неверный формат лимита. Используйте число.")
+                return
+        
+        # Получаем лог аудита
+        audit_logs = await self.db.get_admin_audit_log(limit=limit)
+        
+        if not audit_logs:
+            await update.message.reply_text("📋 Лог аудита пуст.")
+            return
+        
+        # Формируем сообщение
+        text = f"🔍 <b>Лог аудита (последние {len(audit_logs)} записей)</b>\n\n"
+        
+        for i, log_entry in enumerate(audit_logs, 1):
+            admin_id = log_entry['admin_user_id']
+            action = log_entry['action_type']
+            target_id = log_entry.get('target_user_id', 'N/A')
+            details = log_entry.get('details', '')
+            created_at = log_entry['created_at']
+            
+            # Форматируем время
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                time_str = dt.strftime('%d.%m.%Y %H:%M')
+            except:
+                time_str = created_at
+            
+            text += f"{i}. <b>{action}</b>\n"
+            text += f"   👤 Админ: {admin_id}\n"
+            if target_id != 'N/A':
+                text += f"   🎯 Цель: {target_id}\n"
+            if details:
+                text += f"   📝 Детали: {details[:50]}{'...' if len(details) > 50 else ''}\n"
+            text += f"   ⏰ Время: {time_str}\n\n"
+            
+            # Ограничиваем длину сообщения
+            if len(text) > 3500:
+                text += f"... и еще {len(audit_logs) - i} записей"
+                break
+        
+        await update.message.reply_text(text, parse_mode='HTML')
+        
+        # Логируем просмотр аудита
+        await self._log_security_event(user_id, "audit_log_view", "success", details=f"Limit: {limit}")
+
+    async def security_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда для просмотра статистики безопасности (только для super_admin)"""
+        user_id = update.effective_user.id
+        
+        # 🔒 ENHANCED SECURITY: Проверка прав
+        moderator = await self.db.get_moderator(user_id)
+        if not moderator or moderator.role != 'super_admin':
+            await self._log_security_event(user_id, "security_stats_attempt", "unauthorized")
+            await update.message.reply_text("❌ У вас нет прав для просмотра статистики безопасности.")
+            return
+        
+        # Получаем статистику
+        stats = await self.db.get_admin_action_stats(days=30)
+        
+        text = "📊 <b>Статистика безопасности (30 дней)</b>\n\n"
+        
+        if stats:
+            text += f"🔢 <b>Всего действий:</b> {stats.get('total_actions', 0)}\n\n"
+            
+            # Группируем по типам действий
+            action_groups = {}
+            for action, count in stats.items():
+                if action == 'total_actions':
+                    continue
+                
+                base_action = action.split('_')[0] if '_' in action else action
+                if base_action not in action_groups:
+                    action_groups[base_action] = 0
+                action_groups[base_action] += count
+            
+            text += "<b>По типам действий:</b>\n"
+            for action, count in sorted(action_groups.items()):
+                text += f"• {action}: {count}\n"
+        else:
+            text += "📋 Нет данных за последние 30 дней"
+        
+        await update.message.reply_text(text, parse_mode='HTML')
+        
+        # Логируем просмотр статистики
+        await self._log_security_event(user_id, "security_stats_view", "success")
+
+    async def security_stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /security_stats - статистика безопасности системы"""
+        user_id = update.effective_user.id
+        
+        # Проверяем права модератора
+        if not await self.db.is_moderator(user_id):
+            await update.message.reply_text("❌ У вас нет прав модератора")
+            return
+        
+        try:
+            # Получаем системную статистику безопасности
+            system_stats = get_system_security_stats()
+            security_summary = get_security_summary()
+            
+            text = "🛡️ <b>Статистика безопасности системы</b>\n\n"
+            
+            # Статистика пользователей
+            user_stats = system_stats.get('user_stats', {})
+            text += f"👥 <b>Пользователи:</b>\n"
+            text += f"• Всего отслеживается: {user_stats.get('total_users', 0)}\n"
+            text += f"• Заблокировано: {user_stats.get('blocked_users', 0)}\n"
+            
+            # Уровни риска
+            risk_levels = user_stats.get('risk_levels', {})
+            if risk_levels:
+                text += f"• Уровни риска:\n"
+                for level, count in risk_levels.items():
+                    emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}.get(level, "⚪")
+                    text += f"  {emoji} {level.title()}: {count}\n"
+            
+            # Статистика запросов
+            request_stats = system_stats.get('request_stats', {})
+            if request_stats:
+                text += f"\n📊 <b>Активность (последние 5 мин):</b>\n"
+                for req_type, count in request_stats.items():
+                    text += f"• {req_type}: {count}\n"
+            
+            # События безопасности
+            security_stats = system_stats.get('security_stats', {})
+            text += f"\n🚨 <b>События безопасности:</b>\n"
+            text += f"• Всего событий: {security_stats.get('total_events', 0)}\n"
+            text += f"• За последний час: {security_stats.get('recent_events', 0)}\n"
+            
+            # События по серьезности
+            events_by_severity = security_stats.get('events_by_severity', {})
+            if events_by_severity:
+                text += f"• По серьезности:\n"
+                for severity, count in events_by_severity.items():
+                    emoji = {"low": "ℹ️", "medium": "⚠️", "high": "🚨", "critical": "💥"}.get(severity, "❓")
+                    text += f"  {emoji} {severity.title()}: {count}\n"
+            
+            # Время работы системы
+            uptime = system_stats.get('system_uptime', 0)
+            if uptime > 0:
+                hours = int(uptime // 3600)
+                minutes = int((uptime % 3600) // 60)
+                text += f"\n⏱️ <b>Время работы:</b> {hours}ч {minutes}м\n"
+            
+            # Мониторинг пользователей
+            monitored_users = security_summary.get('monitored_users', 0)
+            blocked_patterns = security_summary.get('blocked_patterns', 0)
+            text += f"\n🔍 <b>Мониторинг:</b>\n"
+            text += f"• Отслеживается пользователей: {monitored_users}\n"
+            text += f"• Заблокировано паттернов: {blocked_patterns}\n"
+            
+            await update.message.reply_text(text, parse_mode='HTML')
+            
+            # Логируем просмотр статистики безопасности
+            await self._log_security_event(user_id, "security_stats_view", "success")
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения статистики безопасности: {e}")
+            await update.message.reply_text("❌ Ошибка получения статистики безопасности")
+
+    async def user_security_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /user_security - информация о безопасности пользователя"""
+        user_id = update.effective_user.id
+        
+        # Проверяем права модератора
+        if not await self.db.is_moderator(user_id):
+            await update.message.reply_text("❌ У вас нет прав модератора")
+            return
+        
+        # Получаем ID пользователя из аргументов команды
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Укажите ID пользователя\n"
+                "Использование: /user_security <user_id>"
+            )
+            return
+        
+        try:
+            target_user_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ Неверный формат ID пользователя")
+            return
+        
+        try:
+            # Получаем отчет по безопасности пользователя
+            security_report = get_user_security_report(target_user_id)
+            
+            text = f"🛡️ <b>Отчет по безопасности пользователя {target_user_id}</b>\n\n"
+            
+            # Статистика rate limiter
+            rate_limiter_stats = security_report.get('rate_limiter_stats', {})
+            if rate_limiter_stats and 'error' not in rate_limiter_stats:
+                text += f"📊 <b>Rate Limiter:</b>\n"
+                text += f"• Всего запросов: {rate_limiter_stats.get('total_requests', 0)}\n"
+                text += f"• Нарушений: {rate_limiter_stats.get('violation_count', 0)}\n"
+                text += f"• Уровень риска: {rate_limiter_stats.get('risk_level', 'unknown').title()}\n"
+                text += f"• Заблокирован: {'Да' if rate_limiter_stats.get('is_blocked') else 'Нет'}\n"
+                
+                if rate_limiter_stats.get('is_blocked'):
+                    blocked_until = rate_limiter_stats.get('blocked_until')
+                    if blocked_until:
+                        import time
+                        remaining = int(blocked_until - time.time())
+                        text += f"• Блокировка до: {remaining}с\n"
+                
+                # Подозрительные паттерны
+                suspicious_patterns = rate_limiter_stats.get('suspicious_patterns', [])
+                if suspicious_patterns:
+                    text += f"• Подозрительные паттерны: {', '.join(suspicious_patterns)}\n"
+                
+                # Недавние запросы
+                recent_requests = rate_limiter_stats.get('recent_requests_count', 0)
+                text += f"• Запросов за 5 мин: {recent_requests}\n"
+            else:
+                text += f"📊 <b>Rate Limiter:</b> Данные недоступны\n"
+            
+            # Данные middleware
+            middleware_data = security_report.get('middleware_data', {})
+            if middleware_data:
+                text += f"\n🔍 <b>Middleware:</b>\n"
+                
+                # Подозрительный счет
+                suspicious_score = middleware_data.get('suspicious_score', 0)
+                text += f"• Подозрительный счет: {suspicious_score}\n"
+                
+                # Частота команд
+                command_frequency = middleware_data.get('command_frequency', 0)
+                text += f"• Частота команд: {command_frequency}\n"
+                
+                # Частота callback'ов
+                callback_frequency = middleware_data.get('callback_frequency', 0)
+                text += f"• Частота callback'ов: {callback_frequency}\n"
+                
+                # Дублирующиеся callback'ы
+                duplicate_count = middleware_data.get('duplicate_count', 0)
+                if duplicate_count > 0:
+                    text += f"• Дублирующиеся callback'ы: {duplicate_count}\n"
+            
+            # Время первого появления
+            first_seen = security_report.get('timestamp', 0)
+            if first_seen:
+                import time
+                from datetime import datetime
+                first_seen_dt = datetime.fromtimestamp(first_seen)
+                text += f"\n⏰ <b>Время отчета:</b> {first_seen_dt.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            
+            await update.message.reply_text(text, parse_mode='HTML')
+            
+            # Логируем просмотр отчета пользователя
+            await self._log_security_event(user_id, "user_security_view", "success", 
+                                         details=f"Target user: {target_user_id}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения отчета пользователя {target_user_id}: {e}")
+            await update.message.reply_text("❌ Ошибка получения отчета пользователя")
+
+    async def security_events_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /security_events - последние события безопасности"""
+        user_id = update.effective_user.id
+        
+        # Проверяем права модератора
+        if not await self.db.is_moderator(user_id):
+            await update.message.reply_text("❌ У вас нет прав модератора")
+            return
+        
+        # Получаем количество событий (по умолчанию 10)
+        limit = 10
+        if context.args:
+            try:
+                limit = min(int(context.args[0]), 50)  # Максимум 50 событий
+            except ValueError:
+                pass
+        
+        try:
+            # Получаем последние события безопасности
+            events = get_recent_security_events(limit)
+            
+            if not events:
+                await update.message.reply_text("📋 Нет событий безопасности")
+                return
+            
+            text = f"🚨 <b>Последние {len(events)} событий безопасности</b>\n\n"
+            
+            for i, event in enumerate(events, 1):
+                # Время события
+                event_time = event.get('datetime', 'Unknown')
+                if event_time != 'Unknown':
+                    try:
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(event_time.replace('Z', '+00:00'))
+                        event_time = dt.strftime('%H:%M:%S')
+                    except:
+                        pass
+                
+                # Эмодзи по серьезности
+                severity_emoji = {
+                    "low": "ℹ️",
+                    "medium": "⚠️", 
+                    "high": "🚨",
+                    "critical": "💥"
+                }.get(event.get('severity', 'unknown'), "❓")
+                
+                # Тип события
+                event_type = event.get('event_type', 'unknown')
+                event_type_display = {
+                    "rate_limit_exceeded": "Превышен лимит",
+                    "burst_limit_exceeded": "Превышен burst лимит",
+                    "suspicious_activity": "Подозрительная активность",
+                    "security_stats_view": "Просмотр статистики",
+                    "user_security_view": "Просмотр отчета пользователя"
+                }.get(event_type, event_type)
+                
+                text += f"{i}. {severity_emoji} <b>{event_time}</b>\n"
+                text += f"   👤 User: {event.get('user_id', 'Unknown')}\n"
+                text += f"   📝 Event: {event_type_display}\n"
+                text += f"   🔍 Severity: {event.get('severity', 'unknown').title()}\n"
+                
+                # Детали события
+                details = event.get('details', {})
+                if details:
+                    if 'limit_type' in details:
+                        text += f"   🎯 Type: {details['limit_type']}\n"
+                    if 'violation_count' in details:
+                        text += f"   ⚠️ Violations: {details['violation_count']}\n"
+                    if 'risk_level' in details:
+                        text += f"   🚨 Risk: {details['risk_level'].title()}\n"
+                
+                text += "\n"
+            
+            # Если событий много, обрезаем текст
+            if len(text) > 4000:
+                text = text[:3900] + "\n\n... (события обрезаны)"
+            
+            await update.message.reply_text(text, parse_mode='HTML')
+            
+            # Логируем просмотр событий
+            await self._log_security_event(user_id, "security_events_view", "success", 
+                                         details=f"Limit: {limit}")
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения событий безопасности: {e}")
+            await update.message.reply_text("❌ Ошибка получения событий безопасности")
+
+    async def unblock_user_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Команда /unblock_user - разблокировка пользователя"""
+        user_id = update.effective_user.id
+        
+        # Проверяем права модератора
+        if not await self.db.is_moderator(user_id):
+            await update.message.reply_text("❌ У вас нет прав модератора")
+            return
+        
+        # Получаем ID пользователя из аргументов команды
+        if not context.args:
+            await update.message.reply_text(
+                "❌ Укажите ID пользователя\n"
+                "Использование: /unblock_user <user_id>"
+            )
+            return
+        
+        try:
+            target_user_id = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("❌ Неверный формат ID пользователя")
+            return
+        
+        try:
+            # Импортируем rate_limiter для разблокировки
+            from bot.utils.rate_limiter import rate_limiter
+            
+            # Разблокируем пользователя
+            unblocked = rate_limiter.unblock_user(target_user_id)
+            
+            if unblocked:
+                # Сбрасываем нарушения пользователя
+                rate_limiter.reset_user_violations(target_user_id)
+                
+                await update.message.reply_text(
+                    f"✅ Пользователь {target_user_id} успешно разблокирован\n"
+                    f"🔄 Нарушения сброшены"
+                )
+                
+                # Логируем разблокировку
+                await self._log_security_event(user_id, "user_unblocked", "high", 
+                                             details=f"Target user: {target_user_id}")
+            else:
+                await update.message.reply_text(f"ℹ️ Пользователь {target_user_id} не был заблокирован")
+            
+        except Exception as e:
+            logger.error(f"Ошибка разблокировки пользователя {target_user_id}: {e}")
+            await update.message.reply_text("❌ Ошибка разблокировки пользователя")
+
     async def handle_callback_query(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Основной обработчик callback запросов модерации"""
         query = update.callback_query
         data = query.data
+        user_id = query.from_user.id
         
+        # Пытаемся валидировать как безопасный callback
+        secure_validation = validate_secure_callback(data, user_id)
+        if secure_validation.is_valid:
+            await self._handle_secure_moderation_callback(query, secure_validation, context)
+            return
+        
+        # Если не безопасный callback, используем старую логику для совместимости
+        await self._handle_legacy_moderation_callback(query, data, context)
+    
+    async def _handle_secure_moderation_callback(self, query, validation: CallbackValidationResult, context):
+        """Обработка безопасных callback'ов модерации"""
+        action = validation.action
+        user_id = validation.user_id
+        parsed_data = validation.parsed_data or {}
+        
+        logger.info(f"Processing secure moderation callback: {action} for user {user_id}")
+        
+        try:
+            if action == "moderation_menu":
+                await self.show_moderation_menu(update, context)
+            elif action == "mod_queue":
+                await self.show_moderation_queue(update, context)
+            elif action == "mod_approved":
+                await self.show_approved_profiles(update, context)
+            elif action == "mod_rejected":
+                await self.show_rejected_profiles(update, context)
+            elif action == "mod_stats":
+                await self.show_moderation_stats(update, context)
+            elif action == "approve_user":
+                target_user_id = parsed_data.get("target_user_id")
+                if target_user_id:
+                    # Создаем временный callback для совместимости
+                    query.data = f"approve_{target_user_id}"
+                    await self.approve_profile(update, context)
+                else:
+                    await query.answer("❌ Ошибка: не указан ID пользователя")
+            elif action == "reject_user":
+                target_user_id = parsed_data.get("target_user_id")
+                if target_user_id:
+                    # Создаем временный callback для совместимости
+                    query.data = f"reject_{target_user_id}"
+                    await self.reject_profile(update, context)
+                else:
+                    await query.answer("❌ Ошибка: не указан ID пользователя")
+            elif action == "next_profile":
+                await self.show_next_profile(query, context)
+            else:
+                logger.warning(f"Unknown secure moderation callback action: {action}")
+                await query.answer("❌ Неизвестная команда")
+                
+        except Exception as e:
+            logger.error(f"Error handling secure moderation callback {action}: {e}")
+            await query.answer("❌ Произошла ошибка при обработке команды")
+    
+    async def _handle_legacy_moderation_callback(self, query, data, context):
+        """Обработка legacy callback'ов модерации для совместимости"""
         try:
             if data == "moderation_menu":
                 await self.show_moderation_menu(update, context)
@@ -668,7 +1529,8 @@ class ModerationHandler:
         if context.user_data.get('awaiting_rejection_reason'):
             user_id = context.user_data.get('rejecting_user_id')
             moderator_id = update.effective_user.id
-            custom_reason = update.message.text.strip()
+            # Санитизация пользовательского ввода
+            custom_reason = sanitize_text_input(update.message.text.strip(), max_length=200)
             
             if len(custom_reason) > 200:
                 await update.message.reply_text(

@@ -10,6 +10,11 @@ ENV/
 
 # Bot Configuration
 .env
+.env.*
+!.env.example
+*.env
+config.ini
+secrets.json
 
 # Database files
 *.db
@@ -37,3 +42,39 @@ backups/
 # Temporary files
 tmp/
 temp/
+
+# Security - Additional patterns to prevent secret leaks
+*.key
+*.pem
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+*.jks
+*.keystore
+*.truststore
+*_secret*
+*_token*
+*_key*
+*_password*
+*_passwd*
+*_pwd*
+*_credential*
+*_auth*
+*_api_key*
+*_private*
+*_secret_key*
+*_access_token*
+*_refresh_token*
+
+# Configuration files that might contain secrets
+config.json
+settings.json
+credentials.json
+auth.json
+tokens.json
+api_keys.json
+secrets.yaml
+secrets.yml
+.secrets

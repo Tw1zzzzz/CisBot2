@@ -3,8 +3,10 @@
 Создано организацией Twizz_Project
 """
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
+import logging
+from ..utils.security_validator import security_validator
 
 @dataclass
 class User:
@@ -47,34 +49,55 @@ class Profile:
             if isinstance(value, str):
                 setattr(self, field, datetime.fromisoformat(value))
         
-        # Парсим JSON поля с обработкой ошибок
-        import json
-        import logging
+        # Безопасный парсинг JSON полей с валидацией схемы
         logger = logging.getLogger(__name__)
+        secure_logger = security_validator.get_secure_logger(__name__)
+        
+        # Схемы валидации для JSON полей
+        list_schema = {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 50
+        }
         
         # Безопасный парсинг favorite_maps
         if isinstance(self.favorite_maps, str):
-            try:
-                self.favorite_maps = json.loads(self.favorite_maps)
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.error(f"Ошибка парсинга favorite_maps для user_id={self.user_id}: {e}")
-                self.favorite_maps = []  # Значение по умолчанию
+            parsed_data, validation_result = security_validator.safe_json_loads(
+                self.favorite_maps, 
+                schema=list_schema, 
+                default=[]
+            )
+            if validation_result.is_valid:
+                self.favorite_maps = parsed_data
+            else:
+                secure_logger.error(f"Ошибка валидации favorite_maps для user_id={self.user_id}: {validation_result.error_message}")
+                self.favorite_maps = []
         
         # Безопасный парсинг playtime_slots
         if isinstance(self.playtime_slots, str):
-            try:
-                self.playtime_slots = json.loads(self.playtime_slots)
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.error(f"Ошибка парсинга playtime_slots для user_id={self.user_id}: {e}")
-                self.playtime_slots = []  # Значение по умолчанию
+            parsed_data, validation_result = security_validator.safe_json_loads(
+                self.playtime_slots, 
+                schema=list_schema, 
+                default=[]
+            )
+            if validation_result.is_valid:
+                self.playtime_slots = parsed_data
+            else:
+                secure_logger.error(f"Ошибка валидации playtime_slots для user_id={self.user_id}: {validation_result.error_message}")
+                self.playtime_slots = []
         
         # Безопасный парсинг categories
         if isinstance(self.categories, str):
-            try:
-                self.categories = json.loads(self.categories)
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.error(f"Ошибка парсинга categories для user_id={self.user_id}: {e}")
-                self.categories = []  # Значение по умолчанию
+            parsed_data, validation_result = security_validator.safe_json_loads(
+                self.categories, 
+                schema=list_schema, 
+                default=[]
+            )
+            if validation_result.is_valid:
+                self.categories = parsed_data
+            else:
+                secure_logger.error(f"Ошибка валидации categories для user_id={self.user_id}: {validation_result.error_message}")
+                self.categories = []
     
     def is_approved(self) -> bool:
         """Проверяет, одобрен ли профиль модератором"""
@@ -136,16 +159,58 @@ class UserSettings:
     updated_at: Optional[datetime] = None
     
     def __post_init__(self):
-        # Парсим JSON поля
+        # Безопасный парсинг JSON полей с валидацией
+        secure_logger = security_validator.get_secure_logger(__name__)
+        
+        # Схемы валидации для настроек
+        search_filters_schema = {
+            "type": "object",
+            "properties": {
+                "elo_filter": {"type": "string", "enum": ["lower", "similar", "higher", "any"]},
+                "preferred_roles": {"type": "array", "items": {"type": "string"}, "maxItems": 10},
+                "maps_compatibility": {"type": "string", "enum": ["strict", "moderate", "soft", "any"]},
+                "time_compatibility": {"type": "string", "enum": ["strict", "soft", "any"]},
+                "min_compatibility": {"type": "integer", "minimum": 0, "maximum": 100},
+                "max_candidates": {"type": "integer", "minimum": 1, "maximum": 100}
+            }
+        }
+        
+        privacy_settings_schema = {
+            "type": "object",
+            "properties": {
+                "notifications": {"type": "object"},
+                "profile_visibility": {"type": "string", "enum": ["public", "private", "friends"]},
+                "data_sharing": {"type": "boolean"}
+            }
+        }
+        
+        # Безопасный парсинг search_filters
         if isinstance(self.search_filters, str):
-            import json
-            self.search_filters = json.loads(self.search_filters) if self.search_filters else {}
+            parsed_data, validation_result = security_validator.safe_json_loads(
+                self.search_filters, 
+                schema=search_filters_schema, 
+                default={}
+            )
+            if validation_result.is_valid:
+                self.search_filters = parsed_data
+            else:
+                secure_logger.error(f"Ошибка валидации search_filters: {validation_result.error_message}")
+                self.search_filters = {}
         elif self.search_filters is None:
             self.search_filters = {}
             
+        # Безопасный парсинг privacy_settings
         if isinstance(self.privacy_settings, str):
-            import json
-            self.privacy_settings = json.loads(self.privacy_settings) if self.privacy_settings else {}
+            parsed_data, validation_result = security_validator.safe_json_loads(
+                self.privacy_settings, 
+                schema=privacy_settings_schema, 
+                default={}
+            )
+            if validation_result.is_valid:
+                self.privacy_settings = parsed_data
+            else:
+                secure_logger.error(f"Ошибка валидации privacy_settings: {validation_result.error_message}")
+                self.privacy_settings = {}
         elif self.privacy_settings is None:
             self.privacy_settings = {}
             
@@ -245,10 +310,33 @@ class Moderator:
     is_active: bool = True
     
     def __post_init__(self):
-        # Парсим JSON поля
+        # Безопасный парсинг JSON полей с валидацией
+        secure_logger = security_validator.get_secure_logger(__name__)
+        
+        # Схема валидации для прав модератора
+        permissions_schema = {
+            "type": "object",
+            "properties": {
+                "moderate_profiles": {"type": "boolean"},
+                "manage_moderators": {"type": "boolean"},
+                "view_stats": {"type": "boolean"},
+                "manage_users": {"type": "boolean"},
+                "access_logs": {"type": "boolean"}
+            }
+        }
+        
+        # Безопасный парсинг permissions
         if isinstance(self.permissions, str):
-            import json
-            self.permissions = json.loads(self.permissions) if self.permissions else {}
+            parsed_data, validation_result = security_validator.safe_json_loads(
+                self.permissions, 
+                schema=permissions_schema, 
+                default={}
+            )
+            if validation_result.is_valid:
+                self.permissions = parsed_data
+            else:
+                secure_logger.error(f"Ошибка валидации permissions: {validation_result.error_message}")
+                self.permissions = self.get_default_permissions()
         elif self.permissions is None:
             self.permissions = self.get_default_permissions()
             

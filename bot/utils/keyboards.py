@@ -5,6 +5,7 @@ Inline клавиатуры для CIS FINDER Bot
 import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from .cs2_data import CS2_ROLES, CS2_MAPS, PLAYTIME_OPTIONS, ELO_FILTER_RANGES, PROFILE_CATEGORIES, format_elo_filter_display
+from .enhanced_callback_security import generate_secure_callback, create_secure_button
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,12 @@ class Keyboards:
         if context:
             log_message += f", context='{context}'"
         logger.debug(log_message)
+    
+    @staticmethod
+    def _create_secure_button(text: str, action: str, user_id: int, data: dict = None) -> InlineKeyboardButton:
+        """Создание безопасной кнопки с CSRF токеном"""
+        callback_data, button_text = create_secure_button(text, action, user_id, data)
+        return InlineKeyboardButton(button_text, callback_data=callback_data)
 
     @staticmethod
     def main_menu():
@@ -726,4 +733,117 @@ class Keyboards:
         if nav_row:
             keyboard.append(nav_row)
         keyboard.append([InlineKeyboardButton("🔙 К истории лайков", callback_data="likes_history")])
+        return InlineKeyboardMarkup(keyboard)
+    
+    # === БЕЗОПАСНЫЕ КЛАВИАТУРЫ С CSRF ТОКЕНАМИ ===
+    
+    @staticmethod
+    def secure_main_menu(user_id: int):
+        """Главное меню с CSRF защитой"""
+        keyboard = [
+            [Keyboards._create_secure_button("👤 Мой профиль", "profile_menu", user_id)],
+            [Keyboards._create_secure_button("🔍 Поиск тиммейтов", "search_start", user_id)],
+            [Keyboards._create_secure_button("💝 Мои тиммейты", "teammates_list", user_id)],
+            [Keyboards._create_secure_button("💌 История лайков", "likes_history", user_id)],
+            [Keyboards._create_secure_button("⚙️ Настройки", "settings_menu", user_id)],
+            [Keyboards._create_secure_button("❓ Помощь", "help", user_id)]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def secure_moderation_actions(user_id: int, target_user_id: int):
+        """Безопасные кнопки действий модерации"""
+        keyboard = [
+            [
+                Keyboards._create_secure_button("✅ Одобрить", "approve_user", user_id, {"target_user_id": target_user_id}),
+                Keyboards._create_secure_button("❌ Отклонить", "reject_user", user_id, {"target_user_id": target_user_id})
+            ],
+            [Keyboards._create_secure_button("⏭️ Следующая анкета", "next_profile", user_id)],
+            [Keyboards._create_secure_button("🔙 К модерации", "moderation_menu", user_id)]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def secure_like_buttons(user_id: int, target_user_id: int, loading: bool = False):
+        """Безопасные кнопки лайков"""
+        if loading:
+            keyboard = [
+                [
+                    InlineKeyboardButton("⏳ Загружается...", callback_data="loading"),
+                    Keyboards._create_secure_button("❌ Пропустить", "skip_like", user_id, {"target_user_id": target_user_id})
+                ],
+                [Keyboards._create_secure_button("🔙 В главное меню", "back_to_main", user_id)]
+            ]
+        else:
+            keyboard = [
+                [
+                    Keyboards._create_secure_button("❤️ Лайк", "reply_like", user_id, {"target_user_id": target_user_id}),
+                    Keyboards._create_secure_button("❌ Пропустить", "skip_like", user_id, {"target_user_id": target_user_id})
+                ],
+                [Keyboards._create_secure_button("🔙 В главное меню", "back_to_main", user_id)]
+            ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def secure_profile_edit_menu(user_id: int):
+        """Безопасное меню редактирования профиля"""
+        keyboard = [
+            [Keyboards._create_secure_button("🎯 Изменить ELO Faceit", "edit_elo", user_id)],
+            [Keyboards._create_secure_button("🎮 Изменить ник", "edit_nickname", user_id)],
+            [Keyboards._create_secure_button("🔗 Изменить ссылку Faceit", "edit_faceit_url", user_id)],
+            [Keyboards._create_secure_button("👤 Изменить роль", "edit_role", user_id)],
+            [Keyboards._create_secure_button("🗺️ Изменить карты", "edit_maps", user_id)],
+            [Keyboards._create_secure_button("⏰ Изменить время", "edit_time", user_id)],
+            [Keyboards._create_secure_button("🎮 Изменить категории", "edit_categories", user_id)],
+            [Keyboards._create_secure_button("💬 Изменить описание", "edit_description", user_id)],
+            [Keyboards._create_secure_button("📷 Изменить медиа", "edit_media", user_id)],
+            [Keyboards._create_secure_button("🔙 Назад", "profile_view", user_id)]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def secure_privacy_blocking_menu(user_id: int, blocked_users_info):
+        """Безопасное меню управления блокировкой"""
+        keyboard = []
+        
+        if blocked_users_info:
+            # Показываем до 5 заблокированных пользователей
+            for i, (blocked_user_id, username, reason) in enumerate(blocked_users_info[:5]):
+                display_name = username or f"ID: {blocked_user_id}"
+                reason_text = f" ({reason})" if reason else ""
+                keyboard.append([
+                    Keyboards._create_secure_button(
+                        f"🚫 {display_name}{reason_text}",
+                        "unblock_user",
+                        user_id,
+                        {"target_user_id": blocked_user_id}
+                    )
+                ])
+            
+            if len(blocked_users_info) > 5:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"📋 Показать все ({len(blocked_users_info)})",
+                        callback_data="blocking_show_all"
+                    )
+                ])
+        else:
+            keyboard.append([
+                InlineKeyboardButton("ℹ️ Нет заблокированных пользователей", callback_data="blocking_info")
+            ])
+        
+        keyboard.append([Keyboards._create_secure_button("🔙 Назад", "privacy_menu", user_id)])
+        return InlineKeyboardMarkup(keyboard)
+    
+    @staticmethod
+    def secure_like_response_buttons(user_id: int, liker_id: int):
+        """Безопасные кнопки ответа на лайк"""
+        keyboard = [
+            [
+                Keyboards._create_secure_button("❤️ Лайк в ответ", "reply_like", user_id, {"target_user_id": liker_id}),
+                Keyboards._create_secure_button("❌ Пропустить", "skip_like", user_id, {"target_user_id": liker_id})
+            ],
+            [Keyboards._create_secure_button("👁️ Посмотреть профиль", "view_profile", user_id, {"target_user_id": liker_id})],
+            [Keyboards._create_secure_button("🔙 К истории лайков", "likes_history", user_id)]
+        ]
         return InlineKeyboardMarkup(keyboard) 

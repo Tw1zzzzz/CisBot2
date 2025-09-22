@@ -4,7 +4,9 @@
 """
 import os
 import logging
+from typing import Dict, Optional
 from dotenv import load_dotenv
+from .utils.security_validator import security_validator, ValidationResult
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -15,6 +17,10 @@ class Config:
     # Bot settings
     BOT_TOKEN = os.getenv('BOT_TOKEN')
     BOT_USERNAME = os.getenv('BOT_USERNAME', 'cis_finder_bot')
+    
+    # Валидация критических токенов при загрузке
+    _bot_token_validation = None
+    _faceit_api_validation = None
     
     # Database settings
     DATABASE_PATH = os.getenv('DATABASE_PATH', 'data/bot.db')
@@ -153,9 +159,193 @@ class Config:
     PERFORMANCE_AGGREGATION_INTERVALS = [60, 300, 3600, 86400]  # List of aggregation intervals in seconds
     PERFORMANCE_MAX_MEMORY_USAGE_MB = int(os.getenv('PERFORMANCE_MAX_MEMORY_USAGE_MB', '100'))  # Maximum memory usage for performance data in MB
     PERFORMANCE_DISK_USAGE_WARNING_THRESHOLD = float(os.getenv('PERFORMANCE_DISK_USAGE_WARNING_THRESHOLD', '0.8'))  # Disk usage warning threshold for performance data
+    
+    # Security and Rate Limiting Settings - Comprehensive security configuration
+    SECURITY_ENABLED = os.getenv('SECURITY_ENABLED', 'True').lower() == 'true'  # Enable/disable security features
+    RATE_LIMITING_ENABLED = os.getenv('RATE_LIMITING_ENABLED', 'True').lower() == 'true'  # Enable/disable rate limiting
+    SPAM_PROTECTION_ENABLED = os.getenv('SPAM_PROTECTION_ENABLED', 'True').lower() == 'true'  # Enable/disable spam protection
+    SUSPICIOUS_ACTIVITY_MONITORING = os.getenv('SUSPICIOUS_ACTIVITY_MONITORING', 'True').lower() == 'true'  # Enable/disable suspicious activity monitoring
+    
+    # Rate Limiting Configuration - Granular control over request limits
+    RATE_LIMIT_COMMAND_MAX_REQUESTS = int(os.getenv('RATE_LIMIT_COMMAND_MAX_REQUESTS', '10'))  # Max commands per time window
+    RATE_LIMIT_COMMAND_TIME_WINDOW = int(os.getenv('RATE_LIMIT_COMMAND_TIME_WINDOW', '60'))  # Time window in seconds
+    RATE_LIMIT_COMMAND_BURST_LIMIT = int(os.getenv('RATE_LIMIT_COMMAND_BURST_LIMIT', '3'))  # Max rapid commands
+    RATE_LIMIT_COMMAND_COOLDOWN = int(os.getenv('RATE_LIMIT_COMMAND_COOLDOWN', '120'))  # Cooldown time in seconds
+    
+    RATE_LIMIT_CALLBACK_MAX_REQUESTS = int(os.getenv('RATE_LIMIT_CALLBACK_MAX_REQUESTS', '30'))  # Max callbacks per time window
+    RATE_LIMIT_CALLBACK_TIME_WINDOW = int(os.getenv('RATE_LIMIT_CALLBACK_TIME_WINDOW', '60'))  # Time window in seconds
+    RATE_LIMIT_CALLBACK_BURST_LIMIT = int(os.getenv('RATE_LIMIT_CALLBACK_BURST_LIMIT', '5'))  # Max rapid callbacks
+    RATE_LIMIT_CALLBACK_COOLDOWN = int(os.getenv('RATE_LIMIT_CALLBACK_COOLDOWN', '60'))  # Cooldown time in seconds
+    
+    RATE_LIMIT_MESSAGE_MAX_REQUESTS = int(os.getenv('RATE_LIMIT_MESSAGE_MAX_REQUESTS', '20'))  # Max messages per time window
+    RATE_LIMIT_MESSAGE_TIME_WINDOW = int(os.getenv('RATE_LIMIT_MESSAGE_TIME_WINDOW', '60'))  # Time window in seconds
+    RATE_LIMIT_MESSAGE_BURST_LIMIT = int(os.getenv('RATE_LIMIT_MESSAGE_BURST_LIMIT', '5'))  # Max rapid messages
+    RATE_LIMIT_MESSAGE_COOLDOWN = int(os.getenv('RATE_LIMIT_MESSAGE_COOLDOWN', '90'))  # Cooldown time in seconds
+    
+    # Spam Protection Configuration - Advanced spam detection settings
+    SPAM_DETECTION_RAPID_FIRE_THRESHOLD = int(os.getenv('SPAM_DETECTION_RAPID_FIRE_THRESHOLD', '10'))  # Requests in rapid fire window
+    SPAM_DETECTION_RAPID_FIRE_WINDOW = int(os.getenv('SPAM_DETECTION_RAPID_FIRE_WINDOW', '5'))  # Rapid fire window in seconds
+    SPAM_DETECTION_BURST_ATTACK_THRESHOLD = int(os.getenv('SPAM_DETECTION_BURST_ATTACK_THRESHOLD', '20'))  # Requests in burst window
+    SPAM_DETECTION_BURST_ATTACK_WINDOW = int(os.getenv('SPAM_DETECTION_BURST_ATTACK_WINDOW', '10'))  # Burst window in seconds
+    SPAM_DETECTION_PERSISTENT_SPAM_THRESHOLD = int(os.getenv('SPAM_DETECTION_PERSISTENT_SPAM_THRESHOLD', '50'))  # Requests in persistent window
+    SPAM_DETECTION_PERSISTENT_SPAM_WINDOW = int(os.getenv('SPAM_DETECTION_PERSISTENT_SPAM_WINDOW', '60'))  # Persistent window in seconds
+    
+    # Suspicious Activity Monitoring - Behavioral analysis settings
+    SUSPICIOUS_ACTIVITY_AUTOMATED_BEHAVIOR_THRESHOLD = int(os.getenv('SUSPICIOUS_ACTIVITY_AUTOMATED_BEHAVIOR_THRESHOLD', '100'))  # Requests indicating automation
+    SUSPICIOUS_ACTIVITY_AUTOMATED_BEHAVIOR_WINDOW = int(os.getenv('SUSPICIOUS_ACTIVITY_AUTOMATED_BEHAVIOR_WINDOW', '300'))  # Automation detection window
+    SUSPICIOUS_ACTIVITY_UNUSUAL_TIMING_THRESHOLD = int(os.getenv('SUSPICIOUS_ACTIVITY_UNUSUAL_TIMING_THRESHOLD', '5'))  # Requests in unusual timing
+    SUSPICIOUS_ACTIVITY_UNUSUAL_TIMING_WINDOW = int(os.getenv('SUSPICIOUS_ACTIVITY_UNUSUAL_TIMING_WINDOW', '1'))  # Unusual timing window
+    
+    # Security Logging and Monitoring - Comprehensive security event tracking
+    SECURITY_LOG_ENABLED = os.getenv('SECURITY_LOG_ENABLED', 'True').lower() == 'true'  # Enable security event logging
+    SECURITY_LOG_RETENTION_DAYS = int(os.getenv('SECURITY_LOG_RETENTION_DAYS', '30'))  # Days to keep security logs
+    SECURITY_LOG_CLEANUP_INTERVAL = int(os.getenv('SECURITY_LOG_CLEANUP_INTERVAL', '3600'))  # Cleanup interval in seconds
+    SECURITY_LOG_MAX_EVENTS = int(os.getenv('SECURITY_LOG_MAX_EVENTS', '10000'))  # Maximum events to keep in memory
+    
+    # User Risk Assessment - Dynamic risk level calculation
+    USER_RISK_VIOLATION_THRESHOLD_CRITICAL = int(os.getenv('USER_RISK_VIOLATION_THRESHOLD_CRITICAL', '10'))  # Violations for critical risk
+    USER_RISK_VIOLATION_THRESHOLD_HIGH = int(os.getenv('USER_RISK_VIOLATION_THRESHOLD_HIGH', '5'))  # Violations for high risk
+    USER_RISK_VIOLATION_THRESHOLD_MEDIUM = int(os.getenv('USER_RISK_VIOLATION_THRESHOLD_MEDIUM', '2'))  # Violations for medium risk
+    USER_RISK_SUSPICIOUS_PATTERNS_CRITICAL = int(os.getenv('USER_RISK_SUSPICIOUS_PATTERNS_CRITICAL', '3'))  # Patterns for critical risk
+    USER_RISK_SUSPICIOUS_PATTERNS_HIGH = int(os.getenv('USER_RISK_SUSPICIOUS_PATTERNS_HIGH', '2'))  # Patterns for high risk
+    USER_RISK_SUSPICIOUS_PATTERNS_MEDIUM = int(os.getenv('USER_RISK_SUSPICIOUS_PATTERNS_MEDIUM', '1'))  # Patterns for medium risk
+    
+    # Blocking and Cooldown Configuration - User blocking and recovery settings
+    USER_BLOCK_DURATION_CRITICAL = int(os.getenv('USER_BLOCK_DURATION_CRITICAL', '480'))  # Block duration for critical risk (8 minutes)
+    USER_BLOCK_DURATION_HIGH = int(os.getenv('USER_BLOCK_DURATION_HIGH', '240'))  # Block duration for high risk (4 minutes)
+    USER_BLOCK_DURATION_MEDIUM = int(os.getenv('USER_BLOCK_DURATION_MEDIUM', '120'))  # Block duration for medium risk (2 minutes)
+    USER_BLOCK_DURATION_LOW = int(os.getenv('USER_BLOCK_DURATION_LOW', '60'))  # Block duration for low risk (1 minute)
+    
+    # Security Alert Configuration - Alert thresholds and escalation
+    SECURITY_ALERT_CRITICAL_THRESHOLD = int(os.getenv('SECURITY_ALERT_CRITICAL_THRESHOLD', '5'))  # Critical events before alert
+    SECURITY_ALERT_HIGH_THRESHOLD = int(os.getenv('SECURITY_ALERT_HIGH_THRESHOLD', '10'))  # High events before alert
+    SECURITY_ALERT_MEDIUM_THRESHOLD = int(os.getenv('SECURITY_ALERT_MEDIUM_THRESHOLD', '20'))  # Medium events before alert
+    SECURITY_ALERT_WINDOW = int(os.getenv('SECURITY_ALERT_WINDOW', '300'))  # Alert window in seconds (5 minutes)
+    
+    # Content Security - Message and content validation
+    CONTENT_SECURITY_MAX_MESSAGE_LENGTH = int(os.getenv('CONTENT_SECURITY_MAX_MESSAGE_LENGTH', '2000'))  # Maximum message length
+    CONTENT_SECURITY_SPAM_PATTERN_DETECTION = os.getenv('CONTENT_SECURITY_SPAM_PATTERN_DETECTION', 'True').lower() == 'true'  # Enable spam pattern detection
+    CONTENT_SECURITY_URL_VALIDATION = os.getenv('CONTENT_SECURITY_URL_VALIDATION', 'True').lower() == 'true'  # Enable URL validation
+    CONTENT_SECURITY_SPECIAL_CHAR_LIMIT = int(os.getenv('CONTENT_SECURITY_SPECIAL_CHAR_LIMIT', '20'))  # Maximum special characters in message
+    
+    @classmethod
+    def validate_security_tokens(cls) -> Dict[str, ValidationResult]:
+        """
+        Валидация всех критических токенов безопасности
+        
+        Returns:
+            Словарь с результатами валидации
+        """
+        env_vars = {
+            'BOT_TOKEN': cls.BOT_TOKEN,
+            'FACEIT_ANALYSER_API_KEY': cls.FACEIT_ANALYSER_API_KEY
+        }
+        
+        results = security_validator.validate_environment_variables(env_vars)
+        
+        # Сохраняем результаты валидации
+        cls._bot_token_validation = results.get('BOT_TOKEN')
+        cls._faceit_api_validation = results.get('FACEIT_ANALYSER_API_KEY')
+        
+        return results
+    
+    @classmethod
+    def get_bot_token_validation(cls) -> Optional[ValidationResult]:
+        """Получить результат валидации токена бота"""
+        if cls._bot_token_validation is None:
+            cls.validate_security_tokens()
+        return cls._bot_token_validation
+    
+    @classmethod
+    def get_faceit_api_validation(cls) -> Optional[ValidationResult]:
+        """Получить результат валидации API ключа FACEIT"""
+        if cls._faceit_api_validation is None:
+            cls.validate_security_tokens()
+        return cls._faceit_api_validation
+    
+    @classmethod
+    def is_bot_token_valid(cls) -> bool:
+        """Проверить, валиден ли токен бота"""
+        validation = cls.get_bot_token_validation()
+        return validation.is_valid if validation else False
+    
+    @classmethod
+    def is_faceit_api_valid(cls) -> bool:
+        """Проверить, валиден ли API ключ FACEIT"""
+        validation = cls.get_faceit_api_validation()
+        return validation.is_valid if validation else False
+    
+    @classmethod
+    def get_safe_config_display(cls) -> Dict[str, str]:
+        """
+        Получить безопасное отображение конфигурации с маскированными секретами
+        
+        Returns:
+            Словарь с безопасными значениями конфигурации
+        """
+        safe_config = {}
+        
+        # Основные настройки
+        safe_config['BOT_USERNAME'] = cls.BOT_USERNAME
+        safe_config['DATABASE_PATH'] = cls.DATABASE_PATH
+        safe_config['LOG_LEVEL'] = cls.LOG_LEVEL
+        safe_config['LOG_FILE'] = cls.LOG_FILE
+        
+        # Маскированные секреты
+        if cls.BOT_TOKEN:
+            bot_validation = cls.get_bot_token_validation()
+            safe_config['BOT_TOKEN'] = bot_validation.masked_value if bot_validation else '***MASKED***'
+        else:
+            safe_config['BOT_TOKEN'] = 'NOT_SET'
+        
+        if cls.FACEIT_ANALYSER_API_KEY:
+            faceit_validation = cls.get_faceit_api_validation()
+            safe_config['FACEIT_ANALYSER_API_KEY'] = faceit_validation.masked_value if faceit_validation else '***MASKED***'
+        else:
+            safe_config['FACEIT_ANALYSER_API_KEY'] = 'NOT_SET'
+        
+        # Настройки производительности
+        safe_config['MAX_SEARCH_RESULTS'] = str(cls.MAX_SEARCH_RESULTS)
+        safe_config['COMPATIBILITY_THRESHOLD'] = str(cls.COMPATIBILITY_THRESHOLD)
+        safe_config['DB_POOL_SIZE'] = str(cls.DB_POOL_SIZE)
+        
+        return safe_config
+    
+    @classmethod
+    def log_configuration_safely(cls, logger: logging.Logger) -> None:
+        """
+        Безопасное логирование конфигурации
+        
+        Args:
+            logger: Логгер для записи
+        """
+        # Используем безопасный логгер
+        secure_logger = security_validator.get_secure_logger("config")
+        safe_config = cls.get_safe_config_display()
+        
+        secure_logger.info("=== КОНФИГУРАЦИЯ БОТА ===")
+        for key, value in safe_config.items():
+            security_validator.safe_log_value(key, value, logging.INFO)
+        
+        # Логируем результаты валидации
+        bot_validation = cls.get_bot_token_validation()
+        if bot_validation:
+            if bot_validation.is_valid:
+                secure_logger.info(f"BOT_TOKEN_VALIDATION: ВАЛИДЕН (сила: {bot_validation.strength_score}/100)")
+            else:
+                secure_logger.error(f"BOT_TOKEN_VALIDATION: ОШИБКА - {bot_validation.error_message}")
+        
+        faceit_validation = cls.get_faceit_api_validation()
+        if faceit_validation:
+            if faceit_validation.is_valid:
+                secure_logger.info(f"FACEIT_API_VALIDATION: ВАЛИДЕН (сила: {faceit_validation.strength_score}/100)")
+            else:
+                secure_logger.error(f"FACEIT_API_VALIDATION: ОШИБКА - {faceit_validation.error_message}")
+        
+        secure_logger.info("=== КОНЕЦ КОНФИГУРАЦИИ ===")
 
 def setup_logging():
-    """Настройка системы логирования"""
+    """Настройка системы логирования с безопасной фильтрацией"""
     
     # Создаем папку для логов если её нет
     os.makedirs('logs', exist_ok=True)
@@ -185,7 +375,8 @@ def setup_logging():
     network_logger.addHandler(network_handler)
     network_logger.setLevel(logging.WARNING)
     
-    logger = logging.getLogger(__name__)
-    logger.info("Логирование настроено успешно")
+    # Инициализируем безопасный логгер
+    secure_logger = security_validator.get_secure_logger(__name__)
+    secure_logger.info("Безопасное логирование настроено успешно")
     
-    return logger
+    return secure_logger

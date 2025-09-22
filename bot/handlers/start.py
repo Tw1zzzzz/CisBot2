@@ -8,6 +8,11 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from bot.utils.keyboards import Keyboards
 from bot.database.operations import DatabaseManager
+from bot.utils.callback_security import (
+    safe_parse_user_id, safe_parse_numeric_value, safe_parse_string_value, 
+    sanitize_text_input, validate_callback_data
+)
+from bot.utils.enhanced_callback_security import validate_secure_callback, CallbackValidationResult
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +186,70 @@ class StartHandler:
         
         # DEBUG: логируем все входящие callbacks для диагностики
         logger.info(f"StartHandler received callback: {data} from user {user_id}")
-
+        
+        # Пытаемся валидировать как безопасный callback
+        secure_validation = validate_secure_callback(data, user_id)
+        if secure_validation.is_valid:
+            await self._handle_secure_callback(query, secure_validation, context)
+            return
+        
+        # Если не безопасный callback, используем старую логику для совместимости
+        await self._handle_legacy_callback(query, data, user_id, context)
+    
+    async def _handle_secure_callback(self, query, validation: CallbackValidationResult, context):
+        """Обработка безопасных callback'ов с CSRF токенами"""
+        action = validation.action
+        user_id = validation.user_id
+        parsed_data = validation.parsed_data or {}
+        
+        logger.info(f"Processing secure callback: {action} for user {user_id}")
+        
+        try:
+            if action == "back_to_main":
+                await self.show_main_menu(query)
+            elif action == "help":
+                await self.show_help(query)
+            elif action == "settings_menu":
+                await self.show_settings_menu(query)
+            elif action == "likes_history":
+                await self.show_likes_history(query)
+            elif action == "reply_like":
+                target_user_id = parsed_data.get("target_user_id")
+                if target_user_id:
+                    await self.handle_like_response(query, target_user_id, "reply")
+                else:
+                    await query.answer("❌ Ошибка: не указан ID пользователя")
+            elif action == "skip_like":
+                target_user_id = parsed_data.get("target_user_id")
+                if target_user_id:
+                    await self.handle_like_response(query, target_user_id, "skip")
+                else:
+                    await query.answer("❌ Ошибка: не указан ID пользователя")
+            elif action == "view_profile":
+                target_user_id = parsed_data.get("target_user_id")
+                if target_user_id:
+                    await self.show_user_profile(query, target_user_id)
+                else:
+                    await query.answer("❌ Ошибка: не указан ID пользователя")
+            elif action == "unblock_user":
+                target_user_id = parsed_data.get("target_user_id")
+                if target_user_id:
+                    # Получаем настройки приватности пользователя
+                    user_settings = await self.db.get_user_settings(user_id)
+                    privacy_settings = user_settings.privacy_settings if user_settings and user_settings.privacy_settings else {}
+                    await self.handle_unblock_user(query, f"unblock_{target_user_id}", privacy_settings)
+                else:
+                    await query.answer("❌ Ошибка: не указан ID пользователя")
+            else:
+                logger.warning(f"Unknown secure callback action: {action}")
+                await query.answer("❌ Неизвестная команда")
+                
+        except Exception as e:
+            logger.error(f"Error handling secure callback {action}: {e}")
+            await query.answer("❌ Произошла ошибка при обработке команды")
+    
+    async def _handle_legacy_callback(self, query, data, user_id, context):
+        """Обработка legacy callback'ов для совместимости"""
         if data == "back_to_main":
             await self.show_main_menu(query)
         elif data == "help":
@@ -214,16 +282,44 @@ class StartHandler:
         elif data == "likes_all":
             await self.show_likes_list(query, new_only=False)
         elif data.startswith("likes_page_"):
-            page = int(data.replace("likes_page_", ""))
+            # Безопасный парсинг номера страницы
+            page_result = safe_parse_numeric_value(data, "likes_page_", (0, 1000))
+            if not page_result.is_valid:
+                logger.error(f"Небезопасный callback_data в likes_page: {data} - {page_result.error_message}")
+                await query.answer("❌ Ошибка валидации данных")
+                return
+            
+            page = page_result.parsed_data['value']
             await self.show_likes_list(query, page=page)
         elif data.startswith("reply_like_"):
-            liker_id = int(data.replace("reply_like_", ""))
+            # Безопасный парсинг user_id для лайка
+            liker_id_result = safe_parse_user_id(data, "reply_like_")
+            if not liker_id_result.is_valid:
+                logger.error(f"Небезопасный callback_data в reply_like: {data} - {liker_id_result.error_message}")
+                await query.answer("❌ Ошибка валидации данных")
+                return
+            
+            liker_id = liker_id_result.parsed_data['user_id']
             await self.handle_like_response(query, liker_id, "reply")
         elif data.startswith("skip_like_"):
-            liker_id = int(data.replace("skip_like_", ""))
+            # Безопасный парсинг user_id для пропуска лайка
+            liker_id_result = safe_parse_user_id(data, "skip_like_")
+            if not liker_id_result.is_valid:
+                logger.error(f"Небезопасный callback_data в skip_like: {data} - {liker_id_result.error_message}")
+                await query.answer("❌ Ошибка валидации данных")
+                return
+            
+            liker_id = liker_id_result.parsed_data['user_id']
             await self.handle_like_response(query, liker_id, "skip")
         elif data.startswith("view_profile_"):
-            profile_user_id = int(data.replace("view_profile_", ""))
+            # Безопасный парсинг user_id для просмотра профиля
+            profile_user_id_result = safe_parse_user_id(data, "view_profile_")
+            if not profile_user_id_result.is_valid:
+                logger.error(f"Небезопасный callback_data в view_profile: {data} - {profile_user_id_result.error_message}")
+                await query.answer("❌ Ошибка валидации данных")
+                return
+            
+            profile_user_id = profile_user_id_result.parsed_data['user_id']
             logger.info(f"StartHandler: Processing view_profile_ callback for user {profile_user_id} from user {query.from_user.id}")
             await self.show_user_profile(query, profile_user_id)
     
@@ -728,8 +824,14 @@ class StartHandler:
         user_id = query.from_user.id
         
         if data.startswith("toggle_role_"):
-            # Переключаем роль
-            role_name = data.replace("toggle_role_", "")
+            # Безопасный парсинг имени роли
+            role_result = safe_parse_string_value(data, "toggle_role_")
+            if not role_result.is_valid:
+                logger.error(f"Небезопасный callback_data в toggle_role: {data} - {role_result.error_message}")
+                await query.answer("❌ Ошибка валидации данных")
+                return
+            
+            role_name = role_result.parsed_data['value']
             settings = await self.db.get_user_settings(user_id)
             filters = settings.get_search_filters() if settings else {}
             preferred_roles = filters.get('preferred_roles', [])
@@ -752,8 +854,14 @@ class StartHandler:
             await self.show_roles_filter_options(query)
             
         elif data.startswith("set_maps_filter_"):
-            # Обновляем фильтр карт
-            value = data.replace("set_maps_filter_", "")
+            # Безопасный парсинг значения фильтра карт
+            value_result = safe_parse_string_value(data, "set_maps_filter_")
+            if not value_result.is_valid:
+                logger.error(f"Небезопасный callback_data в set_maps_filter: {data} - {value_result.error_message}")
+                await query.answer("❌ Ошибка валидации данных")
+                return
+            
+            value = value_result.parsed_data['value']
             settings = await self.db.get_user_settings(user_id)
             filters = settings.get_search_filters() if settings else {}
             filters['maps_compatibility'] = value
@@ -761,8 +869,14 @@ class StartHandler:
             await self.show_search_filters_menu(query)
             
         elif data.startswith("set_time_filter_"):
-            # Обновляем фильтр времени
-            value = data.replace("set_time_filter_", "")
+            # Безопасный парсинг значения фильтра времени
+            value_result = safe_parse_string_value(data, "set_time_filter_")
+            if not value_result.is_valid:
+                logger.error(f"Небезопасный callback_data в set_time_filter: {data} - {value_result.error_message}")
+                await query.answer("❌ Ошибка валидации данных")
+                return
+            
+            value = value_result.parsed_data['value']
             settings = await self.db.get_user_settings(user_id)
             filters = settings.get_search_filters() if settings else {}
             filters['time_compatibility'] = value
@@ -770,8 +884,14 @@ class StartHandler:
             await self.show_search_filters_menu(query)
             
         elif data.startswith("set_compatibility_"):
-            # Обновляем порог совместимости
-            value = int(data.replace("set_compatibility_", ""))
+            # Безопасный парсинг значения совместимости
+            value_result = safe_parse_numeric_value(data, "set_compatibility_", (0, 100))
+            if not value_result.is_valid:
+                logger.error(f"Небезопасный callback_data в set_compatibility: {data} - {value_result.error_message}")
+                await query.answer("❌ Ошибка валидации данных")
+                return
+            
+            value = value_result.parsed_data['value']
             settings = await self.db.get_user_settings(user_id)
             filters = settings.get_search_filters() if settings else {}
             filters['min_compatibility'] = value
@@ -1356,7 +1476,14 @@ class StartHandler:
 
     async def handle_unblock_user(self, query, data, privacy_settings):
         """Обрабатывает разблокировку пользователя"""
-        user_id_to_unblock = int(data.replace('unblock_', ''))
+        # Безопасный парсинг user_id для разблокировки
+        user_id_result = safe_parse_user_id(data, "unblock_")
+        if not user_id_result.is_valid:
+            logger.error(f"Небезопасный callback_data в unblock_user: {data} - {user_id_result.error_message}")
+            await query.answer("❌ Ошибка валидации данных")
+            return
+        
+        user_id_to_unblock = user_id_result.parsed_data['user_id']
         
         blocked_users = privacy_settings.get('blocked_users', [])
         if user_id_to_unblock in blocked_users:
