@@ -124,14 +124,19 @@ class RateLimiter:
         self.blocked_users: Dict[int, float] = {}  # user_id -> block_until_timestamp
         self.configs = self.DEFAULT_CONFIGS.copy()
         self._cleanup_task: Optional[asyncio.Task] = None
-        self._start_cleanup_task()
+        self._initialized = False
         
         logger.info("🛡️ Rate Limiter инициализирован с защитой от спама")
     
     def _start_cleanup_task(self):
         """Запуск задачи очистки старых данных"""
-        if self._cleanup_task is None or self._cleanup_task.done():
-            self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
+        try:
+            if self._cleanup_task is None or self._cleanup_task.done():
+                self._cleanup_task = asyncio.create_task(self._periodic_cleanup())
+                self._initialized = True
+        except RuntimeError:
+            # Event loop не запущен, задача будет запущена позже
+            logger.debug("Event loop не запущен, cleanup task будет запущен позже")
     
     async def _periodic_cleanup(self):
         """Периодическая очистка старых данных"""
@@ -255,6 +260,12 @@ class RateLimiter:
             logger.info(f"🔍 MEDIUM SECURITY EVENT: {event_type} from user {user_id}: {details}")
         else:
             logger.debug(f"ℹ️ LOW SECURITY EVENT: {event_type} from user {user_id}: {details}")
+    
+    async def initialize(self):
+        """Инициализация rate limiter после запуска event loop"""
+        if not self._initialized:
+            self._start_cleanup_task()
+            logger.info("🛡️ Rate Limiter cleanup task запущен")
     
     async def check_rate_limit(self, user_id: int, limit_type: RateLimitType, 
                               request_data: Optional[Dict[str, Any]] = None) -> Tuple[bool, str, Dict[str, Any]]:

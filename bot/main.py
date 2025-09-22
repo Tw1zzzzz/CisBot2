@@ -110,6 +110,10 @@ class CS2TeammeetBot:
                 await self.performance_monitor.start_monitoring()
                 logger.info("Performance monitoring запущен успешно")
             
+            # Initialize rate limiter
+            await self.rate_limiter.initialize()
+            logger.info("Rate limiter инициализирован успешно")
+            
             # Initialize progressive loader
             from bot.utils.faceit_analyzer import faceit_analyzer
             

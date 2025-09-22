@@ -320,7 +320,11 @@ class Config:
             logger: Логгер для записи
         """
         # Используем безопасный логгер
-        secure_logger = security_validator.get_secure_logger("config")
+        try:
+            secure_logger = security_validator.get_secure_logger("config")
+        except:
+            # Fallback к обычному логгеру если security_validator недоступен
+            secure_logger = logger
         safe_config = cls.get_safe_config_display()
         
         secure_logger.info("=== КОНФИГУРАЦИЯ БОТА ===")
@@ -376,7 +380,12 @@ def setup_logging():
     network_logger.setLevel(logging.WARNING)
     
     # Инициализируем безопасный логгер
-    secure_logger = security_validator.get_secure_logger(__name__)
-    secure_logger.info("Безопасное логирование настроено успешно")
-    
-    return secure_logger
+    try:
+        secure_logger = security_validator.get_secure_logger(__name__)
+        secure_logger.info("Безопасное логирование настроено успешно")
+        return secure_logger
+    except:
+        # Fallback к обычному логгеру если security_validator недоступен
+        logger = logging.getLogger(__name__)
+        logger.info("Логирование настроено успешно")
+        return logger

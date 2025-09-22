@@ -4,6 +4,7 @@
 """
 import logging
 import asyncio
+from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from bot.database.operations import DatabaseManager
