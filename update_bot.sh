@@ -208,7 +208,7 @@ import asyncio
 async def check_db():
     try:
         db = DatabaseManager('data/bot.db')
-        await db.initialize()
+        await db.init_database()
         await db.close()
         print('✅ База данных совместима')
     except Exception as e:
@@ -222,20 +222,20 @@ asyncio.run(check_db())
 log_info "Проверяем валидность токенов в новой версии..."
 if sudo -u "$BOT_USER" bash -c "cd $BOT_DIR && source venv/bin/activate && python -c \"
 import os
-from bot.config import BOT_TOKEN, FACEIT_ANALYSER_API_KEY
+from bot.config import Config
 from bot.utils.security_validator import validate_token_strength
 
 # Проверяем BOT_TOKEN
-if BOT_TOKEN and len(BOT_TOKEN) > 20:
-    strength = validate_token_strength(BOT_TOKEN)
+if Config.BOT_TOKEN and len(Config.BOT_TOKEN) > 20:
+    strength = validate_token_strength(Config.BOT_TOKEN)
     print(f'BOT_TOKEN: ВАЛИДЕН (сила: {strength}/100)')
 else:
     print('BOT_TOKEN: НЕВАЛИДЕН')
     exit(1)
 
 # Проверяем FACEIT_API_KEY
-if FACEIT_ANALYSER_API_KEY and len(FACEIT_ANALYSER_API_KEY) > 10:
-    strength = validate_token_strength(FACEIT_ANALYSER_API_KEY)
+if Config.FACEIT_ANALYSER_API_KEY and len(Config.FACEIT_ANALYSER_API_KEY) > 10:
+    strength = validate_token_strength(Config.FACEIT_ANALYSER_API_KEY)
     print(f'FACEIT_API_KEY: ВАЛИДЕН (сила: {strength}/100)')
 else:
     print('FACEIT_API_KEY: НЕВАЛИДЕН')

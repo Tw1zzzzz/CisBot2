@@ -253,7 +253,7 @@ class PreDeploySecurityChecker:
                 )
             
             # Проверяем подключение к базе данных
-            db = DatabaseManager(str(db_file))
+            db = DatabaseManager(db_path=str(db_file))
             await db.init_database()
             
             # Проверяем наличие таблиц аудита
