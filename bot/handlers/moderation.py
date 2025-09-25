@@ -1399,6 +1399,10 @@ class ModerationHandler:
     async def _handle_legacy_moderation_callback(self, query, data, context):
         """Обработка legacy callback'ов модерации для совместимости"""
         try:
+            # Создаем объект update из query для совместимости
+            from telegram import Update
+            update = Update(update_id=0, callback_query=query)
+            
             if data == "moderation_menu":
                 await self.show_moderation_menu(update, context)
             elif data == "mod_queue":

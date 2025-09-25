@@ -23,7 +23,7 @@
 ### 1. **Подготовка сервера**
 ```bash
 # Обновляем систему
-sudo apt update && sudo apt upgrade -y
+  sudo apt update && sudo apt upgrade -y
 
 # Устанавливаем зависимости
 sudo apt install -y python3 python3-pip python3-venv git systemd
@@ -56,8 +56,8 @@ FACEIT_ANALYSER_API_KEY=ваш_реальный_api_ключ
 
 ### 3. **Проверка безопасности перед деплоем**
 ```bash
-# Запускаем проверку безопасности
-python scripts/pre_deploy_security_check.py
+# Запускаем проверку безопасности (из корневой директории проекта)
+python3 scripts/pre_deploy_security_check.py
 
 # Если все проверки пройдены, продолжаем деплой
 sudo ./deploy.sh
@@ -80,8 +80,8 @@ journalctl -u cisbot -f
 
 **Обязательно выполните перед деплоем:**
 ```bash
-# Запускаем комплексную проверку безопасности
-python scripts/pre_deploy_security_check.py
+# Запускаем комплексную проверку безопасности (из корневой директории проекта)
+python3 scripts/pre_deploy_security_check.py
 ```
 
 **Что проверяется:**
@@ -300,7 +300,7 @@ python scripts/check_secrets.py
 python scripts/check_secrets.py --verbose
 
 # Проверка перед деплоем
-python scripts/pre_deploy_security_check.py
+python3 scripts/pre_deploy_security_check.py
 ```
 
 ### Мониторинг логов
@@ -363,7 +363,7 @@ cat logs/security_check_report.txt
 # - Обновляем токены
 
 # 3. Повторяем проверку
-python scripts/pre_deploy_security_check.py
+python3 scripts/pre_deploy_security_check.py
 
 # 4. Запускаем деплой
 sudo ./deploy.sh

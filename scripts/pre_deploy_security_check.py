@@ -24,13 +24,21 @@ from dataclasses import dataclass
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
-    from bot.config import BOT_TOKEN, FACEIT_ANALYSER_API_KEY
-    from bot.utils.security_validator import validate_token_strength, get_secure_logger
+    from bot.config import Config
+    from bot.utils.security_validator import security_validator
     from bot.database.operations import DatabaseManager
 except ImportError as e:
     print(f"❌ Ошибка импорта: {e}")
     print("Убедитесь, что вы запускаете скрипт из корневой директории проекта")
     sys.exit(1)
+
+def validate_token_strength(token: str) -> int:
+    """Валидация силы токена"""
+    return security_validator._calculate_token_strength(token)
+
+def get_secure_logger(name: str):
+    """Получение безопасного логгера"""
+    return security_validator.get_secure_logger(name)
 
 # Настройка логирования
 logging.basicConfig(
@@ -102,13 +110,13 @@ class PreDeploySecurityChecker:
         all_valid = True
         
         # Проверяем BOT_TOKEN
-        if not BOT_TOKEN:
+        if not Config.BOT_TOKEN:
             self.add_result(
                 "BOT_TOKEN", "FAIL",
                 "BOT_TOKEN не установлен"
             )
             all_valid = False
-        elif len(BOT_TOKEN) < 20:
+        elif len(Config.BOT_TOKEN) < 20:
             self.add_result(
                 "BOT_TOKEN", "FAIL",
                 "BOT_TOKEN слишком короткий"
@@ -116,7 +124,7 @@ class PreDeploySecurityChecker:
             all_valid = False
         else:
             try:
-                strength = validate_token_strength(BOT_TOKEN)
+                strength = validate_token_strength(Config.BOT_TOKEN)
                 if strength >= 70:
                     self.add_result(
                         "BOT_TOKEN", "PASS",
@@ -135,13 +143,13 @@ class PreDeploySecurityChecker:
                 all_valid = False
         
         # Проверяем FACEIT_API_KEY
-        if not FACEIT_ANALYSER_API_KEY:
+        if not Config.FACEIT_ANALYSER_API_KEY:
             self.add_result(
                 "FACEIT_API_KEY", "FAIL",
                 "FACEIT_ANALYSER_API_KEY не установлен"
             )
             all_valid = False
-        elif len(FACEIT_ANALYSER_API_KEY) < 10:
+        elif len(Config.FACEIT_ANALYSER_API_KEY) < 10:
             self.add_result(
                 "FACEIT_API_KEY", "FAIL",
                 "FACEIT_ANALYSER_API_KEY слишком короткий"
@@ -149,7 +157,7 @@ class PreDeploySecurityChecker:
             all_valid = False
         else:
             try:
-                strength = validate_token_strength(FACEIT_ANALYSER_API_KEY)
+                strength = validate_token_strength(Config.FACEIT_ANALYSER_API_KEY)
                 if strength >= 70:
                     self.add_result(
                         "FACEIT_API_KEY", "PASS",
@@ -246,7 +254,7 @@ class PreDeploySecurityChecker:
             
             # Проверяем подключение к базе данных
             db = DatabaseManager(str(db_file))
-            await db.initialize()
+            await db.init_database()
             
             # Проверяем наличие таблиц аудита
             tables = await db.get_all_tables()
