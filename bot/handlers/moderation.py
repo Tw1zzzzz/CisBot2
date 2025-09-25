@@ -623,7 +623,7 @@ class ModerationHandler:
             )
             
             # Логируем создание токена подтверждения
-            await self._log_security_event(user_id, "add_moderator_confirmation_created", 
+            await self._log_security_event(user_id, "add_moderator_confirmation_created", "success",
                                          target_user_id=target_user_id, details=f"Role: {role}")
             
         except ValueError:
@@ -688,7 +688,7 @@ class ModerationHandler:
             
             if success:
                 # Логируем успешное добавление
-                await self._log_security_event(user_id, "add_moderator_success", target_user_id=target_user_id, 
+                await self._log_security_event(user_id, "add_moderator_success", "success", target_user_id=target_user_id, 
                                              details=f"Role: {role}")
                 
                 await update.message.reply_text(
@@ -825,7 +825,7 @@ class ModerationHandler:
             )
             
             # Логируем создание токена подтверждения
-            await self._log_security_event(user_id, "remove_moderator_confirmation_created", 
+            await self._log_security_event(user_id, "remove_moderator_confirmation_created", "success",
                                          target_user_id=target_user_id, details=f"Role: {target_moderator.role}")
             
         except ValueError:
@@ -879,7 +879,7 @@ class ModerationHandler:
             
             if success:
                 # Логируем успешное удаление
-                await self._log_security_event(user_id, "remove_moderator_success", target_user_id=target_user_id)
+                await self._log_security_event(user_id, "remove_moderator_success", "success", target_user_id=target_user_id)
                 
                 await update.message.reply_text(f"✅ Модератор {target_user_id} деактивирован")
                 
