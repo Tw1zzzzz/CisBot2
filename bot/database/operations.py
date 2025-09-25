@@ -149,6 +149,13 @@ class DatabaseManager:
             
             await self._drain_and_close_pools()
 
+    async def close(self):
+        """
+        Алиас для disconnect() для обратной совместимости.
+        Закрывает все соединения во всех пулах и очищает состояние.
+        """
+        await self.disconnect()
+
     async def _create_connection(self, db_path: str = None, db_type: str = 'main') -> aiosqlite.Connection:
         """Создает одно соединение с настройками для указанной базы данных"""
         if not db_path:
