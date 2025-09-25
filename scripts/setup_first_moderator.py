@@ -41,6 +41,8 @@ logger = logging.getLogger(__name__)
 async def setup_first_moderator(user_id: int, role: str = 'super_admin'):
     """Назначает первого модератора"""
     
+    print(f"🔍 Отладка функции: user_id={user_id} (тип: {type(user_id)}), role={role}")
+    
     # Инициализируем базу данных
     db_manager = DatabaseManager()
     await db_manager.init_database()
@@ -136,7 +138,10 @@ def main():
         print(f"🔍 Отладка: байты: {user_id_str.encode('utf-8')}")
         
         user_id = int(user_id_str)
+        print(f"✅ User ID успешно преобразован в int: {user_id} (тип: {type(user_id)})")
+        
         role = sys.argv[2] if len(sys.argv) > 2 else 'super_admin'
+        print(f"✅ Роль: {role}")
         
         if role not in ['moderator', 'admin', 'super_admin']:
             print(f"❌ Неверная роль: {role}")
