@@ -455,3 +455,8 @@ class SecurityValidator:
 
 # Глобальный экземпляр валидатора
 security_validator = SecurityValidator()
+
+# Публичные функции для удобства использования
+def validate_token_strength(token: str) -> int:
+    """Публичная функция для валидации силы токена"""
+    return security_validator._calculate_token_strength(token)
