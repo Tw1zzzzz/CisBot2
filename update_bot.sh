@@ -112,6 +112,15 @@ fi
 
 # Получаем обновления из GitHub
 log_info "Загружаем обновления из GitHub..."
+
+# Исправляем проблему с правами доступа Git
+log_info "Настраиваем Git safe.directory..."
+git config --global --add safe.directory "$BOT_DIR" 2>/dev/null || true
+
+# Исправляем права доступа к директории
+log_info "Исправляем права доступа к директории..."
+chown -R "$BOT_USER:$BOT_USER" "$BOT_DIR" 2>/dev/null || true
+
 if [ -d ".git" ]; then
     # Если это git репозиторий
     git fetch origin
@@ -123,6 +132,10 @@ else
     cd /opt
     mv cisbot2 cisbot2_old_$TIMESTAMP
     git clone https://github.com/Tw1zzzzz/CisBot2.git cisbot2
+    
+    # Настраиваем права доступа для нового клона
+    chown -R "$BOT_USER:$BOT_USER" cisbot2
+    git config --global --add safe.directory /opt/cisbot2
     
     # Восстанавливаем важные файлы
     cp cisbot2_old_$TIMESTAMP/data/* cisbot2/data/ 2>/dev/null || true
@@ -318,6 +331,11 @@ if systemctl is-active --quiet "$SERVICE_NAME"; then
     log_info "  Конфиг:      $BACKUP_DIR/.env_backup_$TIMESTAMP"
     log_info "  Безопасность: $BACKUP_DIR/security_config_backup_$TIMESTAMP.tar.gz"
     log_info ""
+    # Финальная проверка прав доступа
+    log_info "Проверяем права доступа..."
+    chown -R "$BOT_USER:$BOT_USER" "$BOT_DIR"
+    git config --global --add safe.directory "$BOT_DIR" 2>/dev/null || true
+    
     log_info "🎮 Обновленный бот готов к работе с полной защитой!"
 else
     log_error "❌ ОШИБКА: Не удалось запустить обновленный бот"
