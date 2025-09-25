@@ -130,7 +130,12 @@ def main():
         sys.exit(1)
     
     try:
-        user_id = int(sys.argv[1])
+        # Отладочная информация
+        user_id_str = sys.argv[1].strip()
+        print(f"🔍 Отладка: получен User ID: '{user_id_str}' (длина: {len(user_id_str)})")
+        print(f"🔍 Отладка: байты: {user_id_str.encode('utf-8')}")
+        
+        user_id = int(user_id_str)
         role = sys.argv[2] if len(sys.argv) > 2 else 'super_admin'
         
         if role not in ['moderator', 'admin', 'super_admin']:

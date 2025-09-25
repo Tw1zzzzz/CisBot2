@@ -113,10 +113,16 @@ log_info "✅ Зависимости установлены"
 log_step "Назначение модератора..."
 
 # Запускаем скрипт в виртуальном окружении
+log_info "Запуск скрипта назначения модератора..."
+log_info "Передаваемые параметры: USER_ID='$USER_ID', ROLE='$ROLE'"
+
 sudo -u "$BOT_USER" bash -c "
     cd $BOT_DIR
     source venv/bin/activate
-    python3 scripts/setup_first_moderator.py $USER_ID $ROLE
+    echo '🔍 Отладка: Переданные аргументы:'
+    echo '  \$1 = $USER_ID'
+    echo '  \$2 = $ROLE'
+    python3 scripts/setup_first_moderator.py '$USER_ID' '$ROLE'
 "
 
 if [ $? -eq 0 ]; then
