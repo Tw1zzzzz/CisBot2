@@ -224,12 +224,12 @@ if sudo -u "$BOT_USER" bash -c "cd $BOT_DIR && source venv/bin/activate && pytho
 import os
 import sys
 from bot.config import Config
-from bot.utils.security_validator import security_validator
+from bot.utils.security_validator import validate_token_strength
 
 try:
     # Проверяем BOT_TOKEN
     if Config.BOT_TOKEN and len(Config.BOT_TOKEN) > 20:
-        strength = security_validator._calculate_token_strength(Config.BOT_TOKEN)
+        strength = validate_token_strength(Config.BOT_TOKEN)
         print(f'BOT_TOKEN: ВАЛИДЕН (сила: {strength}/100)')
     else:
         print('BOT_TOKEN: НЕВАЛИДЕН')
@@ -237,7 +237,7 @@ try:
 
     # Проверяем FACEIT_API_KEY
     if Config.FACEIT_ANALYSER_API_KEY and len(Config.FACEIT_ANALYSER_API_KEY) > 10:
-        strength = security_validator._calculate_token_strength(Config.FACEIT_ANALYSER_API_KEY)
+        strength = validate_token_strength(Config.FACEIT_ANALYSER_API_KEY)
         print(f'FACEIT_API_KEY: ВАЛИДЕН (сила: {strength}/100)')
     else:
         print('FACEIT_API_KEY: НЕВАЛИДЕН')

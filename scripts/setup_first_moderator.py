@@ -13,8 +13,23 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from bot.database.operations import DatabaseManager
-from bot.config import Config
+# Проверяем зависимости
+try:
+    import aiosqlite
+    from bot.database.operations import DatabaseManager
+    from bot.config import Config
+except ImportError as e:
+    print(f"❌ Ошибка импорта: {e}")
+    print("")
+    print("🔧 Решение:")
+    print("1. Установите зависимости:")
+    print("   python3 -m pip install -r requirements.txt")
+    print("")
+    print("2. Или запустите скрипт установки:")
+    print("   bash scripts/install_dependencies.sh")
+    print("")
+    print("3. Проверьте, что вы находитесь в корневой директории проекта")
+    sys.exit(1)
 
 # Настройка логирования
 logging.basicConfig(
