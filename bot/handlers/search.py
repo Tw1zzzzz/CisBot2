@@ -62,6 +62,21 @@ class SearchHandler:
         data = query.data
         user_id = query.from_user.id
 
+        # Защита от дублирования callback-запросов
+        callback_key = f"callback_{user_id}_{data}"
+        current_time = asyncio.get_event_loop().time()
+        
+        # Проверяем, не обрабатывался ли этот callback недавно
+        if hasattr(context, 'user_data') and context.user_data:
+            last_callback_time = context.user_data.get(f"last_callback_{data}", 0)
+            if current_time - last_callback_time < 1.0:  # 1 секунда защиты
+                logger.debug(f"Пропуск дублированного callback {data} для пользователя {user_id}")
+                await query.answer()  # Подтверждаем получение, но не обрабатываем
+                return
+            
+            # Сохраняем время последнего callback
+            context.user_data[f"last_callback_{data}"] = current_time
+
         if data == "search_start":
             await self.start_search(update, context)
         elif data == "search_random":

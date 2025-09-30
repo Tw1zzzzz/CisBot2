@@ -204,6 +204,16 @@ class ProfileHandler:
         # DEBUG: Добавляем логирование для отладки
         logger.info(f"ProfileHandler.profile_command: user_id={user_id}, has_profile={has_profile}")
         
+        # КРИТИЧЕСКИЙ ФИКС: Если профиля нет, очищаем состояние разговора
+        # Это предотвращает проблемы с "Profile Creation in Progress" после удаления профиля
+        if not has_profile:
+            logger.info(f"Profile not found for user {user_id}, clearing conversation state to prevent recreation issues")
+            if context.user_data:
+                context.user_data.clear()
+            # Сбрасываем состояние разговора
+            if hasattr(context, 'conversation_state'):
+                context.conversation_state = None
+        
         if has_profile:
             profile = await self.db.get_profile(user_id)
             if profile:
@@ -1124,8 +1134,22 @@ class ProfileHandler:
                     return SELECTING_MEDIA
                 
             elif query.data == "media_skip":
-                # Пропускаем медиа и сохраняем профиль
-                return await self.save_profile(update, context)
+                # Пропускаем медиа
+                if context.user_data.get('editing_media'):
+                    # В режиме редактирования - возвращаемся к профилю без изменений
+                    await query.edit_message_text(
+                        "⏭️ <b>Медиа пропущено</b>\n\n"
+                        "Медиа не было изменено.",
+                        parse_mode='HTML'
+                    )
+                    # Очищаем контекст редактирования
+                    self.clear_editing_context(context)
+                    # Возвращаемся к просмотру профиля
+                    await self.view_full_profile(update, context)
+                    return ConversationHandler.END
+                else:
+                    # При создании профиля - сохраняем профиль
+                    return await self.save_profile(update, context)
                 
             elif query.data == "media_back":
                 # Enhanced back button logging for media selection - LOOP BUG FIXED!
@@ -1143,8 +1167,9 @@ class ProfileHandler:
                 
                 # Проверяем, редактируем ли мы медиа или создаем профиль
                 if context.user_data.get('editing_media'):
-                    # Возвращаемся к меню редактирования медиа
-                    await self.edit_media(update, context, context.user_data.get('editing_profile'))
+                    # В режиме редактирования медиа - возвращаемся к профилю
+                    await self.cancel_media_edit(update, context)
+                    return ConversationHandler.END
                 else:
                     # FIXED: Возвращаемся к предыдущему шагу (описание) вместо зацикливания
                     description = context.user_data['creating_profile'].get('description')
@@ -1404,7 +1429,21 @@ class ProfileHandler:
         data = query.data
         user_id = query.from_user.id
         
-                # Временное логирование для отладки
+        # Защита от дублирования callback-запросов
+        current_time = asyncio.get_event_loop().time()
+        
+        # Проверяем, не обрабатывался ли этот callback недавно
+        if hasattr(context, 'user_data') and context.user_data:
+            last_callback_time = context.user_data.get(f"last_callback_{data}", 0)
+            if current_time - last_callback_time < 1.0:  # 1 секунда защиты
+                logger.debug(f"Пропуск дублированного callback {data} для пользователя {user_id}")
+                await query.answer()  # Подтверждаем получение, но не обрабатываем
+                return
+            
+            # Сохраняем время последнего callback
+            context.user_data[f"last_callback_{data}"] = current_time
+        
+        # Временное логирование для отладки
         logger.info(f"Profile handler получил callback: {data} от пользователя {user_id}")
         logger.info(f"DEBUG: data.startswith('edit_category_') = {data.startswith('edit_category_')}")
         
@@ -1422,13 +1461,13 @@ class ProfileHandler:
         elif data == "edit_categories_done":
             logger.info(f"Обрабатываем edit_categories_done для пользователя {user_id}")
             await self.handle_categories_edit_done(update, context)
-        elif data.startswith("map_"):
+        elif data.startswith("edit_map_"):
             # Обработка выбора карт при редактировании
-            logger.info(f"Обрабатываем map_ callback: {data} для пользователя {user_id}")
+            logger.info(f"Обрабатываем edit_map_ callback: {data} для пользователя {user_id}")
             await self.handle_map_selection_edit(update, context)
-        elif data == "maps_done":
+        elif data == "edit_maps_done":
             # Завершение выбора карт при редактировании
-            logger.info(f"Обрабатываем maps_done для пользователя {user_id}")
+            logger.info(f"Обрабатываем edit_maps_done для пользователя {user_id}")
             await self.handle_maps_edit_done(update, context)
         elif data == "back" and context.user_data.get('editing_field') == 'role':
             # Возврат из редактирования роли
@@ -1446,14 +1485,14 @@ class ProfileHandler:
             # Обработка выбора ELO при редактировании
             logger.info(f"Обрабатываем elo_custom callback для пользователя {user_id}")
             await self.handle_elo_selection_edit(update, context)
-        elif data.startswith("time_"):
-            # Обработка выбора времени при редактировании
-            logger.info(f"Обрабатываем time_ callback: {data} для пользователя {user_id}")
-            await self.handle_time_selection_edit(update, context)
         elif data == "time_done":
             # Завершение выбора времени при редактировании
             logger.info(f"Обрабатываем time_done для пользователя {user_id}")
             await self.handle_time_edit_done(update, context)
+        elif data.startswith("time_"):
+            # Обработка выбора времени при редактировании
+            logger.info(f"Обрабатываем time_ callback: {data} для пользователя {user_id}")
+            await self.handle_time_selection_edit(update, context)
         elif data == "back" and context.user_data.get('editing_field') == 'playtime_slots':
             # Возврат из редактирования времени
             logger.info(f"Возврат из редактирования времени для пользователя {user_id}")
@@ -1462,8 +1501,7 @@ class ProfileHandler:
             # Общий возврат из редактирования
             logger.info(f"Общий возврат из редактирования для пользователя {user_id}")
             await self.cancel_edit(update, context)
-        elif data == "edit_media_add" or data == "edit_media_replace":
-            await self.start_media_edit(update, context)
+        # edit_media_add и edit_media_replace теперь обрабатываются в ConversationHandler
         elif data == "edit_media_remove":
             await self.remove_media(update, context)
         elif data.startswith("edit_"):
@@ -1805,7 +1843,7 @@ class ProfileHandler:
         
         await query.edit_message_text(
             text,
-            reply_markup=Keyboards.maps_selection(profile.favorite_maps),
+            reply_markup=Keyboards.maps_selection(profile.favorite_maps, edit_mode=True),
             parse_mode='HTML'
         )
         
@@ -2062,31 +2100,65 @@ class ProfileHandler:
             logger.error(f"Ошибка при удалении медиа: {e}")
             await query.answer("❌ Произошла ошибка", show_alert=True)
 
+    async def cancel_media_edit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Отменяет редактирование медиа и возвращается к профилю"""
+        try:
+            # Очищаем состояние редактирования медиа
+            if 'editing_media' in context.user_data:
+                del context.user_data['editing_media']
+            if 'selecting_media_type' in context.user_data:
+                del context.user_data['selecting_media_type']
+            
+            # Очищаем общий контекст редактирования
+            self.clear_editing_context(context)
+            
+            # Возвращаемся к просмотру профиля
+            await self.view_full_profile(update, context)
+            
+            return ConversationHandler.END
+            
+        except Exception as e:
+            logger.error(f"Ошибка при отмене редактирования медиа: {e}")
+            # В случае ошибки просто очищаем состояние и возвращаемся в главное меню
+            if context.user_data:
+                context.user_data.clear()
+            return ConversationHandler.END
+
     async def handle_media_edit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обрабатывает медиа при редактировании профиля"""
-        if update.message:
-            # Получили медиа файл
-            if update.message.photo and context.user_data.get('selecting_media_type') == 'photo':
-                # Получили фото
-                photo = update.message.photo[-1]  # Берем самое большое разрешение
-                return await self.save_media_edit(update, context, 'photo', photo.file_id)
-                
-            elif update.message.video and context.user_data.get('selecting_media_type') == 'video':
-                # Получили видео
-                video = update.message.video
-                return await self.save_media_edit(update, context, 'video', video.file_id)
-                
-            else:
-                # Неподходящий тип файла
-                expected_type = context.user_data.get('selecting_media_type', 'медиа')
-                await update.message.reply_text(
-                    f"❌ Ожидается {expected_type}!\n"
-                    f"Пожалуйста, отправьте {expected_type} или вернитесь назад.",
-                    reply_markup=Keyboards.back_button("media_back")
-                )
-                return EDITING_MEDIA_TYPE
-        
-        return EDITING_MEDIA_TYPE
+        try:
+            if update.message:
+                # Получили медиа файл
+                if update.message.photo and context.user_data.get('selecting_media_type') == 'photo':
+                    # Получили фото
+                    photo = update.message.photo[-1]  # Берем самое большое разрешение
+                    return await self.save_media_edit(update, context, 'photo', photo.file_id)
+                    
+                elif update.message.video and context.user_data.get('selecting_media_type') == 'video':
+                    # Получили видео
+                    video = update.message.video
+                    return await self.save_media_edit(update, context, 'video', video.file_id)
+                    
+                else:
+                    # Неподходящий тип файла
+                    expected_type = context.user_data.get('selecting_media_type', 'медиа')
+                    await update.message.reply_text(
+                        f"❌ Ожидается {expected_type}!\n"
+                        f"Пожалуйста, отправьте {expected_type} или вернитесь назад.",
+                        reply_markup=Keyboards.back_button("media_back")
+                    )
+                    return EDITING_MEDIA_TYPE
+            
+            return EDITING_MEDIA_TYPE
+            
+        except Exception as e:
+            logger.error(f"Ошибка в handle_media_edit: {e}")
+            await update.message.reply_text(
+                "❌ Произошла ошибка при обработке медиа.\n"
+                "Попробуйте еще раз или вернитесь назад.",
+                reply_markup=Keyboards.back_button("media_back")
+            )
+            return EDITING_MEDIA_TYPE
     
     async def handle_orphan_media(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """FALLBACK: Обрабатывает медиа файлы вне ConversationHandler"""
@@ -2153,6 +2225,8 @@ class ProfileHandler:
                 self.clear_editing_context(context)
                 if 'editing_media' in context.user_data:
                     del context.user_data['editing_media']
+                if 'selecting_media_type' in context.user_data:
+                    del context.user_data['selecting_media_type']
                 
                 # Показываем обновленный профиль
                 profile = await self.db.get_profile(user_id)
@@ -2289,6 +2363,36 @@ class ProfileHandler:
             if key in context.user_data:
                 del context.user_data[key]
 
+    async def delete_profile_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик удаления профиля с очисткой состояния"""
+        query = update.callback_query
+        user_id = query.from_user.id
+        
+        try:
+            # Удаляем профиль из базы данных
+            success = await self.db.delete_profile(user_id)
+            
+            if success:
+                # КРИТИЧЕСКИЙ ФИКС: Очищаем состояние разговора после удаления профиля
+                logger.info(f"Profile deleted for user {user_id}, clearing conversation state")
+                if context.user_data:
+                    context.user_data.clear()
+                if hasattr(context, 'conversation_state'):
+                    context.conversation_state = None
+                
+                await query.answer("✅ Профиль успешно удален!", show_alert=True)
+                
+                # Показываем главное меню
+                from .start import StartHandler
+                start_handler = StartHandler(self.db)
+                await start_handler.show_main_menu(query)
+            else:
+                await query.answer("❌ Ошибка при удалении профиля", show_alert=True)
+                
+        except Exception as e:
+            logger.error(f"Ошибка при удалении профиля: {e}")
+            await query.answer("❌ Произошла ошибка при удалении", show_alert=True)
+
     async def show_profile_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показывает статистику профиля"""
         query = update.callback_query
@@ -2336,8 +2440,8 @@ class ProfileHandler:
         selected_maps = context.user_data['selected_maps']
         logger.info(f"Текущие selected_maps: {selected_maps}")
         
-        if data.startswith("map_"):
-            map_name = data.replace("map_", "")
+        if data.startswith("edit_map_"):
+            map_name = data.replace("edit_map_", "")
             logger.info(f"Обрабатываем карту: {map_name}")
             
             # Переключаем выбор карты
@@ -2356,7 +2460,7 @@ class ProfileHandler:
             
             # Обновляем клавиатуру
             await query.edit_message_reply_markup(
-                reply_markup=Keyboards.maps_selection(selected_maps)
+                reply_markup=Keyboards.maps_selection(selected_maps, edit_mode=True)
             )
             
             # Показываем количество выбранных карт
@@ -2488,8 +2592,6 @@ class ProfileHandler:
     async def handle_time_selection_edit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обрабатывает выбор времени при редактировании профиля"""
         query = update.callback_query
-        await query.answer()
-        
         user_id = query.from_user.id
         data = query.data
         
@@ -2503,7 +2605,8 @@ class ProfileHandler:
         if 'selected_playtime_slots' not in context.user_data:
             context.user_data['selected_playtime_slots'] = profile.playtime_slots.copy()
         
-        selected_slots = context.user_data['selected_playtime_slots']
+        # Получаем копию списка, чтобы избежать проблем с ссылками
+        selected_slots = context.user_data['selected_playtime_slots'].copy()
         
         if data.startswith("time_"):
             slot_id = data.replace("time_", "")
@@ -2514,6 +2617,7 @@ class ProfileHandler:
             else:
                 selected_slots.append(slot_id)
             
+            # Обновляем context.user_data с новым списком
             context.user_data['selected_playtime_slots'] = selected_slots
             
             # Обновляем клавиатуру
@@ -2521,27 +2625,32 @@ class ProfileHandler:
                 reply_markup=Keyboards.playtime_selection(selected_slots)
             )
             
-            # Показываем количество выбранных времен
+            # Показываем количество выбранных времен и подтверждаем callback
             count_text = f"Выбрано времен: {len(selected_slots)}"
-            await query.answer(count_text, show_alert=False)
+            await query.answer(count_text)
 
     async def handle_time_edit_done(self, update: Update, context:ContextTypes.DEFAULT_TYPE):
         """Завершает выбор времени при редактировании"""
         query = update.callback_query
-        await query.answer()
-        
         user_id = query.from_user.id
         selected_slots = context.user_data.get('selected_playtime_slots', [])
+        
+        logger.info(f"Обработка завершения выбора времени для пользователя {user_id}: {selected_slots}")
         
         if len(selected_slots) == 0:
             await query.answer("❌ Выберите хотя бы один временной промежуток!", show_alert=True)
             return
         
+        # Подтверждаем callback query только если все проверки пройдены
+        await query.answer()
+        
         try:
             # Обновляем профиль в БД
+            logger.info(f"Сохранение времени игры для пользователя {user_id}: {selected_slots}")
             success = await self.db.update_profile(user_id, playtime_slots=selected_slots)
             
             if success:
+                logger.info(f"Время игры успешно обновлено для пользователя {user_id}")
                 await query.answer("✅ Время игры обновлено!", show_alert=True)
                 
                 # Очищаем временные данные
@@ -2550,10 +2659,11 @@ class ProfileHandler:
                 # Возвращаемся к просмотру профиля
                 await self.view_full_profile(update, context)
             else:
+                logger.error(f"Ошибка при сохранении времени игры для пользователя {user_id}")
                 await query.answer("❌ Ошибка при сохранении", show_alert=True)
                 
         except Exception as e:
-            logger.error(f"Ошибка при обновлении времени: {e}")
+            logger.error(f"Ошибка при обновлении времени для пользователя {user_id}: {e}", exc_info=True)
             await query.answer("❌ Произошла ошибка", show_alert=True)
 
     async def handle_profile_edit_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

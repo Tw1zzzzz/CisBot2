@@ -606,6 +606,37 @@ class DatabaseManager:
             logger.error(f"Ошибка проверки одобренного профиля {user_id}: {e}")
             return False
 
+    async def delete_profile(self, user_id: int) -> bool:
+        """Удаляет профиль пользователя и все связанные данные"""
+        try:
+            async with self.acquire_connection() as db:
+                async with db.transaction():
+                    # Удаляем профиль
+                    cursor = await db.execute("DELETE FROM profiles WHERE user_id = ?", (user_id,))
+                    profile_deleted = cursor.rowcount > 0
+                    
+                    # Удаляем лайки пользователя
+                    await db.execute("DELETE FROM likes WHERE liker_id = ? OR liked_id = ?", (user_id, user_id))
+                    
+                    # Удаляем матчи пользователя
+                    await db.execute("DELETE FROM matches WHERE user1_id = ? OR user2_id = ?", (user_id, user_id))
+                    
+                    # Удаляем настройки пользователя
+                    await db.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
+                    
+                    await db.commit()
+                    
+                    if profile_deleted:
+                        logger.info(f"Successfully deleted profile and related data for user {user_id}")
+                    else:
+                        logger.warning(f"No profile found to delete for user {user_id}")
+                    
+                    return profile_deleted
+                    
+        except Exception as e:
+            logger.error(f"Ошибка удаления профиля {user_id}: {e}")
+            return False
+
     async def create_profile(self, user_id: int, game_nickname: str, faceit_elo: int, faceit_url: str, 
                            role: str, favorite_maps: List[str], playtime_slots: List[str], 
                            categories: List[str], description: Optional[str] = None, 
@@ -704,6 +735,7 @@ class DatabaseManager:
                 
                 for field, value in kwargs.items():
                     if field in ['favorite_maps', 'playtime_slots', 'categories'] and isinstance(value, list):
+                        logger.info(f"Обновление поля {field} для пользователя {user_id}: {value}")
                         value = json.dumps(value)
                     fields.append(f"{field} = ?")
                     values.append(value)
@@ -716,13 +748,14 @@ class DatabaseManager:
                 values.append(user_id)
                 
                 query = f"UPDATE profiles SET {', '.join(fields)} WHERE user_id = ?"
+                logger.info(f"Выполнение запроса: {query} с параметрами: {values}")
                 await db.execute(query, values)
                 await db.commit()
                 
                 logger.info(f"Профиль обновлен для пользователя {user_id}")
                 return True
         except Exception as e:
-            logger.error(f"Ошибка обновления профиля {user_id}: {e}")
+            logger.error(f"Ошибка обновления профиля {user_id}: {e}", exc_info=True)
             return False
 
     # === ЛАЙКИ ===

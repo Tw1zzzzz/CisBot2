@@ -261,7 +261,7 @@ class CS2TeammeetBot:
                 SELECTING_MAPS: [
                     CallbackQueryHandler(
                         profile_handler_instance.handle_maps_selection,
-                        pattern="^(map_|maps_done|back).*$"
+                        pattern="^(map_(Ancient|Dust2|Inferno|Mirage|Nuke|Overpass|Train)|maps_done|back)$"
                     )
                 ],
                 SELECTING_PLAYTIME: [
@@ -341,7 +341,7 @@ class CS2TeammeetBot:
                 EDITING_MEDIA_TYPE: [
                     CallbackQueryHandler(
                         profile_handler_instance.handle_media_selection,
-                        pattern="^(media_photo|media_video|media_back)$"
+                        pattern="^(media_photo|media_video|media_skip|media_back)$"
                     ),
                     MessageHandler(
                         filters.PHOTO | filters.VIDEO,
@@ -351,9 +351,10 @@ class CS2TeammeetBot:
             },
             fallbacks=[
                 CallbackQueryHandler(
-                    profile_handler_instance.view_full_profile,
-                    pattern="^(media_back|profile_view)$"
-                )
+                    profile_handler_instance.cancel_media_edit,
+                    pattern="^(media_back|profile_view|back_to_main)$"
+                ),
+                CommandHandler("cancel", profile_handler_instance.cancel_media_edit)
             ],
             name="media_editing",
             persistent=False
@@ -390,7 +391,7 @@ class CS2TeammeetBot:
         
         self.application.add_handler(CallbackQueryHandler(
             profile_handler_instance.handle_callback_query,
-            pattern="^(profile_menu|profile_view|profile_edit|profile_stats|edit_|confirm_edit_|cancel_edit_|elo_|role_|map_|time_|edit_categor|back).*$"
+            pattern="^(profile_menu|profile_view|profile_edit|profile_stats|edit_|confirm_edit_|cancel_edit_|elo_|role_|map_|time_|edit_categor|edit_media_remove|back).*$"
         ))
         
         self.application.add_handler(CallbackQueryHandler(
@@ -475,15 +476,15 @@ class CS2TeammeetBot:
                 logger.error(f"Primary feedback failed: {e}. Attempting fallback recovery...")
                 # Fallback recovery attempt
                 try:
-                    await query.answer("⚠️ Something went wrong. Please try returning to the main menu.", show_alert=True)
+                    await query.answer("⚠️ Что-то пошло не так. Попробуйте вернуться в главное меню.", show_alert=True)
                     # Attempt to provide basic recovery options
                     fallback_keyboard = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🏠 Main Menu", callback_data="back_to_main")],
-                        [InlineKeyboardButton("🔄 Try Again", callback_data="back_to_main")]
+                        [InlineKeyboardButton("🏠 Главное меню", callback_data="back_to_main")],
+                        [InlineKeyboardButton("🔄 Попробовать снова", callback_data="back_to_main")]
                     ])
                     await query.edit_message_text(
-                        "⚠️ <b>Recovery Mode</b>\n\n"
-                        "The system encountered an error. Please choose a recovery option:",
+                        "⚠️ <b>Режим восстановления</b>\n\n"
+                        "Система столкнулась с ошибкой. Пожалуйста, выберите вариант восстановления:",
                         reply_markup=fallback_keyboard,
                         parse_mode='HTML'
                     )
@@ -492,7 +493,31 @@ class CS2TeammeetBot:
                     # Last resort - try to clear user state
                     if context.user_data:
                         context.user_data.clear()
-                    await query.answer("❌ System error. Your session has been reset.", show_alert=True)
+                    # Clear conversation state to prevent profile creation issues
+                    if hasattr(context, 'conversation_state'):
+                        context.conversation_state = None
+                    await query.answer("❌ Ошибка системы. Ваша сессия была сброшена.", show_alert=True)
+
+    def _clear_user_conversation_state(self, context: ContextTypes.DEFAULT_TYPE):
+        """Clears user conversation state and user_data to prevent profile creation issues"""
+        try:
+            # Clear user_data
+            if context.user_data:
+                context.user_data.clear()
+                logger.info("Cleared user_data to prevent profile creation state issues")
+            
+            # Clear conversation state if it exists
+            if hasattr(context, 'conversation_state'):
+                context.conversation_state = None
+                logger.info("Cleared conversation_state")
+                
+            # Clear any pending conversation handlers
+            if hasattr(context, 'conversation_handler'):
+                context.conversation_handler = None
+                logger.info("Cleared conversation_handler")
+                
+        except Exception as e:
+            logger.error(f"Error clearing user conversation state: {e}")
 
     def _analyze_callback_pattern(self, callback_data: str, conversation_state: str, context: ContextTypes.DEFAULT_TYPE) -> dict:
         """Analyzes callback pattern to understand why it failed"""
@@ -683,41 +708,41 @@ class CS2TeammeetBot:
         
         # Enhanced user-friendly messaging based on conversation state
         if conversation_state == "creating_profile":
-            short_feedback = "⚠️ Let's get your profile back on track"
+            short_feedback = "⚠️ Давайте вернем создание профиля в нужное русло"
             
             if validation_errors:
                 if "profile_data_not_dict" in validation_errors:
                     detailed_feedback = (
-                        "🔧 <b>Profile Creation Issue</b>\n\n"
-                        "It looks like there was a technical hiccup with your profile data. "
-                        "Don't worry - this happens sometimes!\n\n"
-                        f"📋 What we tried: <code>{callback_data}</code>\n"
-                        f"🔍 Issue: {callback_explanation}\n\n"
-                        "✨ <b>How to fix this:</b>"
+                        "🔧 <b>Проблема с созданием профиля</b>\n\n"
+                        "Похоже, произошла техническая ошибка с данными вашего профиля. "
+                        "Не волнуйтесь - такое иногда случается!\n\n"
+                        f"📋 Что мы пытались сделать: <code>{callback_data}</code>\n"
+                        f"🔍 Проблема: {callback_explanation}\n\n"
+                        "✨ <b>Как это исправить:</b>"
                     )
                 else:
                     detailed_feedback = (
-                        "📝 <b>Profile Creation in Progress</b>\n\n"
-                        "We noticed you're in the middle of creating your profile. "
-                        "Let's continue where you left off!\n\n"
-                        f"📋 Button pressed: <code>{callback_data}</code>\n"
-                        f"🔍 Analysis: {callback_explanation}\n\n"
-                        "✨ <b>Choose what works best for you:</b>"
+                        "📝 <b>Создание профиля в процессе</b>\n\n"
+                        "Мы заметили, что вы находитесь в процессе создания профиля. "
+                        "Давайте продолжим с того места, где остановились!\n\n"
+                        f"📋 Нажатая кнопка: <code>{callback_data}</code>\n"
+                        f"🔍 Анализ: {callback_explanation}\n\n"
+                        "✨ <b>Выберите, что подходит лучше всего:</b>"
                     )
             else:
                 detailed_feedback = (
-                    "📝 <b>Profile Creation Helper</b>\n\n"
-                    "Looks like that button isn't quite working right now. "
-                    "No worries - we have several ways to get you back on track!\n\n"
-                    f"🔍 Analysis: {callback_explanation}\n\n"
-                    "✨ <b>What would you like to do?</b>"
+                    "📝 <b>Помощник создания профиля</b>\n\n"
+                    "Похоже, эта кнопка сейчас не работает как надо. "
+                    "Не переживайте - у нас есть несколько способов вернуть вас в нужное русло!\n\n"
+                    f"🔍 Анализ: {callback_explanation}\n\n"
+                    "✨ <b>Что бы вы хотели сделать?</b>"
                 )
             
             # Smart recovery options for profile creation
             keyboard.extend([
-                [InlineKeyboardButton("🔄 Continue Creating Profile", callback_data="profile_create")],
-                [InlineKeyboardButton("💾 Save Current Progress", callback_data="back_to_main")],
-                [InlineKeyboardButton("🆘 Step-by-Step Guide", callback_data="help")]
+                [InlineKeyboardButton("🔄 Продолжить создание профиля", callback_data="profile_create")],
+                [InlineKeyboardButton("💾 Сохранить текущий прогресс", callback_data="back_to_main")],
+                [InlineKeyboardButton("🆘 Пошаговое руководство", callback_data="help")]
             ])
             
         elif conversation_state == "editing_profile":
@@ -853,6 +878,11 @@ class CS2TeammeetBot:
         """
         error = context.error
         
+        # Проверяем тип ошибки ПЕРЕД использованием переменных
+        is_network_error = isinstance(error, (NetworkError, TimedOut, httpx.ConnectError, httpx.TimeoutException))
+        is_dns_error = isinstance(error, httpx.ConnectError) and "getaddrinfo failed" in str(error)
+        is_background_processor_error = "Background processor" in str(error) or "background" in str(error).lower()
+        
         # Check background processor health on repeated errors
         bg_processor = get_background_processor()
         if not bg_processor.is_healthy():
@@ -874,11 +904,6 @@ class CS2TeammeetBot:
             except Exception as e:
                 logger.debug(f"Error updating performance metrics in error handler: {e}")
         
-        # Проверяем тип ошибки
-        is_network_error = isinstance(error, (NetworkError, TimedOut, httpx.ConnectError, httpx.TimeoutException))
-        is_dns_error = isinstance(error, httpx.ConnectError) and "getaddrinfo failed" in str(error)
-        is_background_processor_error = "Background processor" in str(error) or "background" in str(error).lower()
-        
         if is_background_processor_error:
             # Handle background processor specific errors
             logger.warning(f"Background processor ошибка: {error}")
@@ -896,7 +921,10 @@ class CS2TeammeetBot:
             return
         
         # Логируем остальные ошибки как ERROR
-        logger.error(f"Ошибка при обработке обновления {update}: {error}", exc_info=True)
+        if update is None:
+            logger.error(f"Ошибка при обработке обновления None: {error}", exc_info=True)
+        else:
+            logger.error(f"Ошибка при обработке обновления {update}: {error}", exc_info=True)
         
         # Попытаемся отправить пользователю сообщение об ошибке (только для не-сетевых ошибок)
         try:

@@ -129,7 +129,7 @@ class Keyboards:
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
-    def maps_selection(selected_maps: list = None):
+    def maps_selection(selected_maps: list = None, edit_mode: bool = False):
         if selected_maps is None:
             selected_maps = []
             
@@ -146,14 +146,16 @@ class Keyboards:
                     
                     # Добавляем галочку если карта выбрана
                     button_text = f"{'✅' if is_selected else map_data['emoji']} {map_name}"
-                    callback_data = f"map_{map_name}"
+                    # Используем разные callback_data для создания и редактирования
+                    callback_data = f"{'edit_map_' if edit_mode else 'map_'}{map_name}"
                     row.append(InlineKeyboardButton(button_text, callback_data=callback_data))
             keyboard.append(row)
         
         # Кнопки управления
         control_row = []
         if selected_maps:
-            control_row.append(InlineKeyboardButton(f"✅ Готово ({len(selected_maps)})", callback_data="maps_done"))
+            done_callback = "edit_maps_done" if edit_mode else "maps_done"
+            control_row.append(InlineKeyboardButton(f"✅ Готово ({len(selected_maps)})", callback_data=done_callback))
         
         # Log back button creation
         Keyboards._log_button_creation("back", "back", "maps_selection keyboard")

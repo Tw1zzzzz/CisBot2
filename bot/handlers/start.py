@@ -36,6 +36,14 @@ class StartHandler:
         has_approved_profile = await self.db.has_approved_profile(user.id)
         
         if not has_any_profile:
+            # КРИТИЧЕСКИЙ ФИКС: Очищаем состояние разговора если профиля нет
+            # Это предотвращает проблемы с "Profile Creation in Progress" после удаления профиля
+            logger.info(f"No profile found for user {user.id}, clearing conversation state to prevent recreation issues")
+            if context.user_data:
+                context.user_data.clear()
+            if hasattr(context, 'conversation_state'):
+                context.conversation_state = None
+            
             # У пользователя нет профиля - принудительно предлагаем создать
             welcome_text = (
                 f"🎮 <b>Добро пожаловать в CIS FINDER, {user.first_name}!</b>\n\n"
@@ -183,6 +191,20 @@ class StartHandler:
         query = update.callback_query
         data = query.data
         user_id = query.from_user.id
+        
+        # Защита от дублирования callback-запросов
+        current_time = asyncio.get_event_loop().time()
+        
+        # Проверяем, не обрабатывался ли этот callback недавно
+        if hasattr(context, 'user_data') and context.user_data:
+            last_callback_time = context.user_data.get(f"last_callback_{data}", 0)
+            if current_time - last_callback_time < 1.0:  # 1 секунда защиты
+                logger.debug(f"Пропуск дублированного callback {data} для пользователя {user_id}")
+                await query.answer()  # Подтверждаем получение, но не обрабатываем
+                return
+            
+            # Сохраняем время последнего callback
+            context.user_data[f"last_callback_{data}"] = current_time
         
         # DEBUG: логируем все входящие callbacks для диагностики
         logger.info(f"StartHandler received callback: {data} from user {user_id}")
