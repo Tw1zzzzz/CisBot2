@@ -295,10 +295,14 @@ def format_playtime_display(start: int, end: int) -> str:
         return f"{time_data['emoji']} {time_data['name']}"
     return f"⏰ {start:02d}:00 - {end:02d}:00"
 
-def format_maps_list(maps: list, max_count: int = 3) -> str:
+def format_maps_list(maps: list, max_count: int = None) -> str:
     """Форматирует список карт для отображения"""
     if not maps:
         return "❌ Карты не выбраны"
+    
+    # Если max_count не указан, показываем все карты
+    if max_count is None:
+        max_count = len(maps)
     
     formatted_maps = []
     for i, map_name in enumerate(maps):
@@ -397,10 +401,14 @@ def get_category_by_id(category_id: str) -> dict:
     """Получает данные категории по ID"""
     return next((category for category in PROFILE_CATEGORIES if category["id"] == category_id), None)
 
-def format_categories_display(categories: list, max_count: int = 3) -> str:
+def format_categories_display(categories: list, max_count: int = None) -> str:
     """Форматирует список категорий для отображения"""
     if not categories:
         return "❌ Категории не выбраны"
+    
+    # Если max_count не указан, показываем все категории
+    if max_count is None:
+        max_count = len(categories)
     
     formatted_categories = []
     for i, category_id in enumerate(categories):

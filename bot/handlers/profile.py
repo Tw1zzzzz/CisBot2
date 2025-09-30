@@ -374,7 +374,12 @@ class ProfileHandler:
                 # Не критично, продолжаем без данных от API
         
         text += f"👤 <b>Роль:</b> {format_role_display(profile.role)}\n"
-        text += f"🗺️ <b>Любимые карты:</b> {', '.join(profile.favorite_maps[:3])}{'...' if len(profile.favorite_maps) > 3 else ''}\n"
+        # Форматируем все любимые карты с эмодзи
+        formatted_maps = []
+        for map_name in profile.favorite_maps:
+            from bot.utils.cs2_data import format_map_display
+            formatted_maps.append(format_map_display(map_name))
+        text += f"🗺️ <b>Любимые карты:</b> {', '.join(formatted_maps)}\n"
         
         # Время игры
         time_names = []
@@ -387,7 +392,7 @@ class ProfileHandler:
         # Категории
         if hasattr(profile, 'categories') and profile.categories:
             from bot.utils.cs2_data import format_categories_display
-            categories_text = format_categories_display(profile.categories, max_count=2)
+            categories_text = format_categories_display(profile.categories)
             text += f"🎮 <b>Категории:</b> {categories_text}\n"
         
         if profile.description:

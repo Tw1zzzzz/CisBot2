@@ -1791,7 +1791,10 @@ class StartHandler:
                 profile_text += f"🎯 ELO Faceit: {profile.faceit_elo}\n"
             
             profile_text += f"👤 Роль: {profile.role}\n"
-            profile_text += f"🗺️ Карты: {', '.join(profile.favorite_maps[:3])}\n"
+            # Форматируем все любимые карты с эмодзи
+            from bot.utils.cs2_data import format_map_display
+            formatted_maps = [format_map_display(map_name) for map_name in profile.favorite_maps]
+            profile_text += f"🗺️ Карты: {', '.join(formatted_maps)}\n"
             
             if profile.description and len(profile.description.strip()) > 0:
                 profile_text += f"\n📝 <b>О себе:</b>\n{profile.description}\n"

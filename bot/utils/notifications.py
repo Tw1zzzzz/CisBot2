@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any
 from telegram import Bot, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import TelegramError
 from bot.database.operations import DatabaseManager
+from bot.utils.cs2_data import format_map_display
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,7 @@ class NotificationManager:
                 f"<b>{partner_profile.game_nickname}</b>\n\n"
                 f"🎯 Ранг: {partner_profile.faceit_elo} ELO\n"
                 f"🎮 Роль: {partner_profile.role}\n"
-                f"🗺️ Карты: {', '.join(partner_profile.favorite_maps[:3])}\n\n"
+                f"🗺️ Карты: {', '.join([format_map_display(map_name) for map_name in partner_profile.favorite_maps])}\n\n"
                 f"💬 Теперь вы можете связаться друг с другом!\n"
                 f"👥 Проверьте раздел 'Тиммейты' для контактов."
             )

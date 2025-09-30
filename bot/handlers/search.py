@@ -478,7 +478,7 @@ class SearchHandler:
                 favorite_maps = getattr(candidate, 'favorite_maps', [])
                 if not isinstance(favorite_maps, list):
                     favorite_maps = []
-                text += f"🗺️ <b>Любимые карты:</b> {format_maps_list(favorite_maps, max_count=4)}\n"
+                text += f"🗺️ <b>Любимые карты:</b> {format_maps_list(favorite_maps)}\n"
             except Exception as maps_error:
                 logger.warning(f"Ошибка отображения карт для кандидата {candidate.user_id}: {maps_error}")
                 text += f"🗺️ <b>Любимые карты:</b> Ошибка загрузки\n"
@@ -515,7 +515,7 @@ class SearchHandler:
                     categories = candidate.categories
                     if isinstance(categories, list) and len(categories) > 0:
                         from bot.utils.cs2_data import format_categories_display
-                        categories_text = format_categories_display(categories, max_count=2)
+                        categories_text = format_categories_display(categories)
                         text += f"🎮 <b>Категории:</b> {categories_text}\n"
             except Exception as categories_error:
                 logger.warning(f"Ошибка отображения категорий для кандидата {candidate.user_id}: {categories_error}")
