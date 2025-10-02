@@ -87,15 +87,6 @@
   "show_matches_count": true,
   "show_activity": true,
   "show_faceit_url": true,
-  "blocked_users": [123456, 789012], // список user_id
-  "block_reasons": {
-    "123456": "spam",
-    "789012": "toxicity"
-  },
-  "block_expiry": {
-    "123456": null, // навсегда
-    "789012": "2025-08-09T00:00:00Z" // до даты
-  }
 }
 ```
 
@@ -104,7 +95,6 @@
 privacy_visibility        → показать варианты видимости
 privacy_likes            → показать варианты лайков  
 privacy_display          → показать настройки отображения
-privacy_blocking         → показать управление блокировкой
 
 visibility_all           → установить видимость "всем"
 visibility_matches       → установить "только матчам"
@@ -121,9 +111,6 @@ toggle_show_matches     → переключить показ матчей
 toggle_show_activity    → переключить показ активности
 toggle_show_faceit      → переключить показ Faceit URL
 
-block_user_{user_id}    → заблокировать пользователя
-unblock_user_{user_id}  → разблокировать пользователя
-block_reason_{reason}   → выбрать причину блокировки
 ```
 
 ---
@@ -135,14 +122,12 @@ block_reason_{reason}   → выбрать причину блокировки
 - [ ] `privacy_visibility_menu()` - выбор видимости профиля
 - [ ] `privacy_likes_menu()` - настройки лайков
 - [ ] `privacy_display_menu()` - настройки отображения данных
-- [ ] `privacy_blocking_menu()` - управление блокировкой
 
 ### ЭТАП 2: Обработчики настроек (2 часа)  
 - [ ] `show_privacy_menu()` - главное меню
 - [ ] `handle_visibility_setting()` - изменение видимости
 - [ ] `handle_likes_setting()` - настройка лайков
 - [ ] `handle_display_toggle()` - переключение отображения 
-- [ ] `handle_blocking()` - блокировка/разблокировка
 
 ### ЭТАП 3: Интеграция с БД (1 час)
 - [ ] Сохранение настроек в `user_settings.privacy_settings`
@@ -154,7 +139,6 @@ block_reason_{reason}   → выбрать причину блокировки
 - [ ] Фильтрация в `find_candidates()` по видимости
 - [ ] Проверка настроек лайков в `SearchHandler`
 - [ ] Скрытие данных в зависимости от настроек отображения
-- [ ] Проверка блокировки перед показом профилей
 
 ### ЭТАП 5: Валидация и UX (0.5 часа)
 - [ ] Подтверждение критичных изменений

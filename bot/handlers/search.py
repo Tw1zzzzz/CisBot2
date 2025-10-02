@@ -12,6 +12,7 @@ from bot.utils.faceit_analyzer import faceit_analyzer
 from bot.utils.background_processor import TaskPriority
 from bot.utils.progressive_loader import get_progressive_loader
 from bot.database.operations import DatabaseManager
+from bot.utils.subscription_middleware import subscription_required
 
 logger = logging.getLogger(__name__)
 

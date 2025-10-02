@@ -18,6 +18,7 @@ from bot.utils.progressive_loader import get_progressive_loader
 from bot.utils.notifications import NotificationManager
 from bot.database.operations import DatabaseManager
 from bot.utils.callback_security import sanitize_text_input
+from bot.utils.subscription_middleware import subscription_required
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,7 @@ class ProfileHandler:
         }
         return state_steps.get(state, 0)
     
+    @subscription_required
     async def profile_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Команда /profile - показывает профиль пользователя с медиа"""
         user_id = update.effective_user.id
@@ -546,6 +548,7 @@ class ProfileHandler:
 
     # === СОЗДАНИЕ ПРОФИЛЯ ===
     
+    @subscription_required
     async def start_profile_creation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Начинает процесс создания профиля"""
         query = update.callback_query

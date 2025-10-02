@@ -155,6 +155,7 @@ class UserSettings:
     notifications_enabled: bool = True
     search_filters: Optional[dict] = None
     privacy_settings: Optional[dict] = None
+    subscription_status: Optional[dict] = None  # Статус подписки на каналы
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     
@@ -181,6 +182,16 @@ class UserSettings:
                 "notifications": {"type": "object"},
                 "profile_visibility": {"type": "string", "enum": ["public", "private", "friends"]},
                 "data_sharing": {"type": "boolean"}
+            }
+        }
+        
+        subscription_status_schema = {
+            "type": "object",
+            "properties": {
+                "is_subscribed": {"type": "boolean"},
+                "missing_channels": {"type": "array", "items": {"type": "string"}},
+                "last_checked": {"type": "string"},
+                "check_count": {"type": "integer", "minimum": 0}
             }
         }
         
@@ -213,6 +224,21 @@ class UserSettings:
                 self.privacy_settings = {}
         elif self.privacy_settings is None:
             self.privacy_settings = {}
+            
+        # Безопасный парсинг subscription_status
+        if isinstance(self.subscription_status, str):
+            parsed_data, validation_result = security_validator.safe_json_loads(
+                self.subscription_status, 
+                schema=subscription_status_schema, 
+                default={}
+            )
+            if validation_result.is_valid:
+                self.subscription_status = parsed_data
+            else:
+                secure_logger.error(f"Ошибка валидации subscription_status: {validation_result.error_message}")
+                self.subscription_status = {}
+        elif self.subscription_status is None:
+            self.subscription_status = {}
             
         # Парсим даты
         for field in ['created_at', 'updated_at']:
@@ -298,6 +324,38 @@ class UserSettings:
         self.privacy_settings['notifications'] = current_notifications
         
         return self.get_notification_settings()
+    
+    def get_subscription_status(self) -> dict:
+        """Возвращает статус подписки с значениями по умолчанию"""
+        defaults = {
+            'is_subscribed': False,
+            'missing_channels': ['cisfinder', 'tw1zzV'],
+            'last_checked': None,
+            'check_count': 0
+        }
+        
+        # Объединяем с сохраненными настройками
+        result = defaults.copy()
+        if self.subscription_status:
+            result.update(self.subscription_status)
+        return result
+    
+    def update_subscription_status(self, is_subscribed: bool, missing_channels: list, 
+                                 last_checked: str = None) -> dict:
+        """Обновляет статус подписки"""
+        if not self.subscription_status:
+            self.subscription_status = {}
+        
+        current_status = self.get_subscription_status()
+        current_status.update({
+            'is_subscribed': is_subscribed,
+            'missing_channels': missing_channels,
+            'last_checked': last_checked,
+            'check_count': current_status.get('check_count', 0) + 1
+        })
+        
+        self.subscription_status = current_status
+        return current_status
 
 @dataclass
 class Moderator:
@@ -377,4 +435,9 @@ class Moderator:
     
     def can_manage_moderators(self) -> bool:
         """Может ли управлять модераторами"""
-        return self.is_active and self.permissions.get('manage_moderators', False) 
+        return self.is_active and self.permissions.get('manage_moderators', False)
+    
+    def can_manage_users(self) -> bool:
+        """Может ли управлять пользователями (удалять профили)"""
+        # Все активные модераторы могут удалять профили
+        return self.is_active 

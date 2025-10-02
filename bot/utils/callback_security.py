@@ -96,11 +96,6 @@ class CallbackSecurityValidator:
             required_fields=['value'],
             security_level=SecurityLevel.MEDIUM
         ),
-        'unblock_user': CallbackPattern(
-            pattern=r'^unblock_(\d+)$',
-            required_fields=['user_id'],
-            security_level=SecurityLevel.HIGH
-        ),
         
         # Фильтры
         'filter_elo': CallbackPattern(

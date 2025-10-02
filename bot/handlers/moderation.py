@@ -1388,6 +1388,22 @@ class ModerationHandler:
                     await query.answer("❌ Ошибка: не указан ID пользователя")
             elif action == "next_profile":
                 await self.show_next_profile(query, context)
+            elif action == "delete_profile":
+                target_user_id = parsed_data.get("target_user_id")
+                if target_user_id:
+                    # Создаем временный callback для совместимости
+                    query.data = f"delete_profile_{target_user_id}"
+                    await self.confirm_delete_profile(update, context)
+                else:
+                    await query.answer("❌ Ошибка: не указан ID пользователя")
+            elif action == "confirm_delete_profile":
+                target_user_id = parsed_data.get("target_user_id")
+                if target_user_id:
+                    # Создаем временный callback для совместимости
+                    query.data = f"confirm_delete_{target_user_id}"
+                    await self.execute_delete_profile(update, context)
+                else:
+                    await query.answer("❌ Ошибка: не указан ID пользователя")
             else:
                 logger.warning(f"Unknown secure moderation callback action: {action}")
                 await query.answer("❌ Неизвестная команда")
@@ -1421,6 +1437,10 @@ class ModerationHandler:
                 await self.reject_profile(update, context)
             elif data == "next_profile":
                 await self.show_next_profile(query, context)
+            elif data.startswith("delete_profile_"):
+                await self.confirm_delete_profile(update, context)
+            elif data.startswith("confirm_delete_"):
+                await self.execute_delete_profile(update, context)
             else:
                 await query.answer("❌ Неизвестная команда")
         except Exception as e:
@@ -1429,40 +1449,14 @@ class ModerationHandler:
 
     async def show_approved_profiles(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показывает список одобренных профилей"""
-        query = update.callback_query
-        await query.answer()
-        user_id = query.from_user.id
-
-        if not await self.db.is_moderator(user_id):
-            await query.edit_message_text("❌ Нет прав доступа")
-            return
-
-        # Получаем одобренные профили
-        profiles = await self.db.get_profiles_for_moderation('approved', limit=10)
-        
-        if not profiles:
-            text = "✅ <b>Одобренные анкеты</b>\n\nОдобренных анкет пока нет."
-        else:
-            text = f"✅ <b>Одобренные анкеты ({len(profiles)})</b>\n\n"
-            
-            for i, profile_data in enumerate(profiles, 1):
-                nickname = profile_data['game_nickname']
-                user_name = profile_data['first_name']
-                moderated_at = profile_data.get('moderated_at', 'Неизвестно')
-                
-                text += f"{i}. <b>{nickname}</b> ({user_name})\n"
-                text += f"   📅 Одобрено: {moderated_at}\n\n"
-        
-        keyboard = [[InlineKeyboardButton("🔙 К модерации", callback_data="moderation_menu")]]
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='HTML'
-        )
+        await self.show_profile_list_with_actions(update, context, 'approved')
 
     async def show_rejected_profiles(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показывает список отклоненных профилей"""
+        await self.show_profile_list_with_actions(update, context, 'rejected')
+
+    async def show_profile_list_with_actions(self, update: Update, context: ContextTypes.DEFAULT_TYPE, status: str):
+        """Показывает список профилей с кнопками действий"""
         query = update.callback_query
         await query.answer()
         user_id = query.from_user.id
@@ -1471,31 +1465,214 @@ class ModerationHandler:
             await query.edit_message_text("❌ Нет прав доступа")
             return
 
-        # Получаем отклоненные профили
-        profiles = await self.db.get_profiles_for_moderation('rejected', limit=10)
+        # Получаем модератора и проверяем права
+        moderator = await self.db.get_moderator(user_id)
+        if not moderator:
+            await query.edit_message_text("❌ Модератор не найден")
+            return
+
+        can_delete = moderator.can_manage_users()
+
+        # Получаем профили
+        profiles = await self.db.get_profiles_for_moderation(status, limit=10)
         
         if not profiles:
-            text = "❌ <b>Отклоненные анкеты</b>\n\nОтклоненных анкет пока нет."
+            status_text = "одобренных" if status == 'approved' else "отклонённых"
+            text = f"📋 <b>{'✅ Одобренные' if status == 'approved' else '❌ Отклонённые'} анкеты</b>\n\n{status_text.capitalize()} анкет пока нет."
         else:
-            text = f"❌ <b>Отклоненные анкеты ({len(profiles)})</b>\n\n"
+            status_emoji = "✅" if status == 'approved' else "❌"
+            status_text = "Одобренные" if status == 'approved' else "Отклонённые"
+            text = f"{status_emoji} <b>{status_text} анкеты ({len(profiles)})</b>\n\n"
             
             for i, profile_data in enumerate(profiles, 1):
                 nickname = profile_data['game_nickname']
                 user_name = profile_data['first_name']
-                reason = profile_data.get('moderation_reason', 'Причина не указана')
+                profile_user_id = profile_data['user_id']
                 moderated_at = profile_data.get('moderated_at', 'Неизвестно')
                 
                 text += f"{i}. <b>{nickname}</b> ({user_name})\n"
-                text += f"   🚫 Причина: {reason}\n"
-                text += f"   📅 Отклонено: {moderated_at}\n\n"
-        
-        keyboard = [[InlineKeyboardButton("🔙 К модерации", callback_data="moderation_menu")]]
+                text += f"   🆔 ID: {profile_user_id}\n"
+                text += f"   📅 {'Одобрено' if status == 'approved' else 'Отклонено'}: {moderated_at}\n\n"
+
+        # Создаём клавиатуру с действиями
+        from bot.utils.keyboards import Keyboards
+        keyboard = Keyboards.moderation_profile_list_actions(profiles, can_delete)
         
         await query.edit_message_text(
             text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=keyboard,
             parse_mode='HTML'
         )
+
+    async def confirm_delete_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Подтверждение удаления профиля"""
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+
+        # Парсим user_id из callback_data
+        from bot.utils.callback_security import safe_parse_user_id
+        result = safe_parse_user_id(query.data, "delete_profile_")
+        target_user_id = result.parsed_data.get('user_id') if result.is_valid and result.parsed_data else None
+        if not target_user_id:
+            await query.edit_message_text("❌ Ошибка: неверный ID пользователя")
+            return
+
+        # Проверяем права модератора
+        moderator = await self.db.get_moderator(user_id)
+        if not moderator or not moderator.can_manage_users():
+            await self._log_security_event(user_id, "delete_profile_attempt", "insufficient_permissions", target_user_id=target_user_id)
+            await query.edit_message_text("❌ У вас нет прав на удаление анкет")
+            return
+
+        # Получаем профиль
+        profile = await self.db.get_profile(target_user_id)
+        if not profile:
+            await query.edit_message_text("❌ Профиль не найден")
+            return
+
+        # Форматируем информацию о профиле
+        text = "⚠️ <b>Подтверждение удаления анкеты</b>\n\n"
+        text += f"🎮 <b>Ник:</b> {profile.game_nickname}\n"
+        text += f"⭐ <b>ELO:</b> {profile.faceit_elo}\n"
+        text += f"🎯 <b>Роль:</b> {profile.role}\n"
+        text += f"📅 <b>Создана:</b> {profile.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+        text += "⚠️ <b>Вы действительно хотите удалить эту анкету?</b>\n"
+        text += "Это действие необратимо!"
+
+        # Создаём клавиатуру подтверждения
+        from bot.utils.keyboards import Keyboards
+        keyboard = Keyboards.moderation_delete_confirmation(target_user_id)
+        
+        await query.edit_message_text(
+            text,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+
+    async def execute_delete_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Выполнение удаления профиля"""
+        query = update.callback_query
+        await query.answer()
+        user_id = query.from_user.id
+
+        # Парсим user_id из callback_data
+        from bot.utils.callback_security import safe_parse_user_id
+        result = safe_parse_user_id(query.data, "confirm_delete_")
+        target_user_id = result.parsed_data.get('user_id') if result.is_valid and result.parsed_data else None
+        if not target_user_id:
+            await query.edit_message_text("❌ Ошибка: неверный ID пользователя")
+            return
+
+        # Двойная проверка прав модератора
+        moderator = await self.db.get_moderator(user_id)
+        if not moderator or not moderator.can_manage_users():
+            await self._log_security_event(user_id, "delete_profile_attempt", "insufficient_permissions", target_user_id=target_user_id)
+            await query.edit_message_text("❌ У вас нет прав на удаление анкет")
+            return
+
+        try:
+            # Получаем информацию о профиле перед удалением (для логирования)
+            profile = await self.db.get_profile(target_user_id)
+            if not profile:
+                await query.edit_message_text("❌ Профиль не найден")
+                return
+
+            game_nickname = profile.game_nickname
+
+            # Выполняем удаление
+            success = await self.db.delete_profile(target_user_id)
+            
+            if success:
+                # Логируем успешное удаление
+                await self._log_security_event(
+                    user_id, 
+                    "delete_profile", 
+                    "success", 
+                    target_user_id=target_user_id,
+                    details=f"nickname: {game_nickname}"
+                )
+                
+                # Отправляем уведомление пользователю
+                notification_sent = await self.send_deletion_notification(target_user_id, context, user_id)
+                
+                # Показываем сообщение модератору
+                text = "✅ <b>Анкета успешно удалена</b>\n\n"
+                text += f"🎮 <b>Удалённый профиль:</b> {game_nickname}\n"
+                text += f"🆔 <b>ID пользователя:</b> {target_user_id}\n\n"
+                
+                if notification_sent:
+                    text += "✅ Пользователь получил уведомление об удалении."
+                else:
+                    text += "ℹ️ Пользователь недоступен для уведомления (возможно, заблокировал бота)."
+                
+                keyboard = [[InlineKeyboardButton("🔙 К модерации", callback_data="moderation_menu")]]
+                
+                await query.edit_message_text(
+                    text,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='HTML'
+                )
+            else:
+                # Логируем ошибку удаления
+                await self._log_security_event(
+                    user_id, 
+                    "delete_profile", 
+                    "database_error", 
+                    target_user_id=target_user_id,
+                    details=f"nickname: {game_nickname}"
+                )
+                
+                await query.edit_message_text("❌ Ошибка при удалении анкеты. Попробуйте позже.")
+                
+        except Exception as e:
+            logger.error(f"Ошибка при удалении профиля {target_user_id}: {str(e)}", exc_info=True)
+            await self._log_security_event(
+                user_id, 
+                "delete_profile", 
+                "exception", 
+                target_user_id=target_user_id,
+                details=f"error: {str(e)}"
+            )
+            await query.edit_message_text("❌ Произошла ошибка при удалении анкеты.")
+
+    async def send_deletion_notification(self, user_id: int, context: ContextTypes.DEFAULT_TYPE, moderator_id: int) -> bool:
+        """Отправляет уведомление пользователю об удалении анкеты
+        
+        Returns:
+            bool: True если уведомление отправлено успешно, False если пользователь недоступен
+        """
+        try:
+            text = "🗑️ <b>Ваша анкета была удалена модератором</b>\n\n"
+            text += "Вы можете создать новую анкету через главное меню."
+            
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode='HTML'
+            )
+            
+            logger.info(f"Уведомление об удалении анкеты отправлено пользователю {user_id}")
+            return True
+            
+        except Exception as e:
+            error_message = str(e).lower()
+            
+            # Проверяем тип ошибки
+            if any(phrase in error_message for phrase in [
+                'chat not found', 
+                'bot was blocked', 
+                'user is deactivated',
+                'chat_id is empty',
+                'peer_id_invalid'
+            ]):
+                # Это нормальные случаи - пользователь заблокировал бота или удалил аккаунт
+                logger.debug(f"Пользователь {user_id} недоступен для уведомления: {str(e)}")
+                return False
+            else:
+                # Это реальные ошибки, которые нужно логировать как warning
+                logger.warning(f"Ошибка отправки уведомления пользователю {user_id}: {str(e)}")
+                return False
 
     async def show_moderation_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Показывает статистику модерации"""

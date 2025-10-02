@@ -405,6 +405,13 @@ class DatabaseManager:
                 # Колонка уже существует
                 pass
         
+        # Добавляем поле subscription_status для существующих БД
+        try:
+            await db.execute("ALTER TABLE user_settings ADD COLUMN subscription_status TEXT")
+        except Exception:
+            # Колонка уже существует
+            pass
+        
         # Добавляем поле categories для существующих БД
         try:
             await db.execute("ALTER TABLE profiles ADD COLUMN categories TEXT NOT NULL DEFAULT '[]'")
@@ -455,6 +462,7 @@ class DatabaseManager:
                 notifications_enabled BOOLEAN DEFAULT 1,
                 search_filters TEXT,
                 privacy_settings TEXT,
+                subscription_status TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
@@ -610,7 +618,10 @@ class DatabaseManager:
         """Удаляет профиль пользователя и все связанные данные"""
         try:
             async with self.acquire_connection() as db:
-                async with db.transaction():
+                # Начинаем транзакцию
+                await db.execute("BEGIN")
+                
+                try:
                     # Удаляем профиль
                     cursor = await db.execute("DELETE FROM profiles WHERE user_id = ?", (user_id,))
                     profile_deleted = cursor.rowcount > 0
@@ -624,6 +635,7 @@ class DatabaseManager:
                     # Удаляем настройки пользователя
                     await db.execute("DELETE FROM user_settings WHERE user_id = ?", (user_id,))
                     
+                    # Подтверждаем транзакцию
                     await db.commit()
                     
                     if profile_deleted:
@@ -632,6 +644,11 @@ class DatabaseManager:
                         logger.warning(f"No profile found to delete for user {user_id}")
                     
                     return profile_deleted
+                    
+                except Exception as e:
+                    # Откатываем транзакцию в случае ошибки
+                    await db.rollback()
+                    raise e
                     
         except Exception as e:
             logger.error(f"Ошибка удаления профиля {user_id}: {e}")
@@ -1359,7 +1376,7 @@ class DatabaseManager:
                 values = []
                 
                 for field, value in kwargs.items():
-                    if field in ['search_filters', 'privacy_settings'] and isinstance(value, (dict, list)):
+                    if field in ['search_filters', 'privacy_settings', 'subscription_status'] and isinstance(value, (dict, list)):
                         value = json.dumps(value)
                     fields.append(f"{field} = ?")
                     values.append(value)
@@ -1376,6 +1393,63 @@ class DatabaseManager:
                 return True
         except Exception as e:
             logger.error(f"Ошибка обновления настроек {user_id}: {e}")
+            return False
+    
+    async def update_subscription_status(self, user_id: int, is_subscribed: bool, 
+                                       missing_channels: list, last_checked: str = None) -> bool:
+        """Обновляет статус подписки пользователя"""
+        try:
+            # Получаем текущие настройки
+            settings = await self.get_user_settings(user_id)
+            if not settings:
+                # Создаем настройки если их нет
+                await self.update_user_settings(user_id)
+                settings = await self.get_user_settings(user_id)
+            
+            # Обновляем статус подписки
+            subscription_status = settings.update_subscription_status(
+                is_subscribed=is_subscribed,
+                missing_channels=missing_channels,
+                last_checked=last_checked
+            )
+            
+            # Сохраняем в базу данных
+            success = await self.update_user_settings(
+                user_id, 
+                subscription_status=subscription_status
+            )
+            
+            if success:
+                logger.info(f"Статус подписки обновлен для пользователя {user_id}: подписан={is_subscribed}")
+            else:
+                logger.error(f"Ошибка сохранения статуса подписки для пользователя {user_id}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Ошибка обновления статуса подписки для пользователя {user_id}: {e}")
+            return False
+    
+    async def get_subscription_status(self, user_id: int) -> Optional[dict]:
+        """Получает статус подписки пользователя"""
+        try:
+            settings = await self.get_user_settings(user_id)
+            if settings:
+                return settings.get_subscription_status()
+            return None
+        except Exception as e:
+            logger.error(f"Ошибка получения статуса подписки для пользователя {user_id}: {e}")
+            return None
+    
+    async def is_user_subscribed(self, user_id: int) -> bool:
+        """Проверяет, подписан ли пользователь на все обязательные каналы"""
+        try:
+            subscription_status = await self.get_subscription_status(user_id)
+            if subscription_status:
+                return subscription_status.get('is_subscribed', False)
+            return False
+        except Exception as e:
+            logger.error(f"Ошибка проверки подписки для пользователя {user_id}: {e}")
             return False
 
     # === МОДЕРАЦИЯ ===

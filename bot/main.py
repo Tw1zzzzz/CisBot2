@@ -22,6 +22,8 @@ from .utils.faceit_cache import FaceitCacheManager
 from .utils.performance_monitor import PerformanceMonitor
 from .utils.rate_limiter import rate_limiter
 from .utils.security_middleware import security_middleware
+from .utils.subscription_checker import SubscriptionChecker, set_subscription_checker
+from .utils.subscription_middleware import SubscriptionMiddleware, set_subscription_middleware
 from .database.operations import DatabaseManager
 from .handlers.start import StartHandler
 from .handlers.profile import ProfileHandler, ENTERING_NICKNAME, SELECTING_ELO, ENTERING_FACEIT_URL, SELECTING_ROLE, SELECTING_MAPS, SELECTING_PLAYTIME, SELECTING_CATEGORIES, ENTERING_DESCRIPTION, SELECTING_MEDIA, EDITING_MEDIA_TYPE
@@ -69,6 +71,17 @@ class CS2TeammeetBot:
             .pool_timeout(30)  # Таймаут пула соединений (по умолчанию 5)
             .build()
         )
+        
+        logger.info("Инициализация Subscription Systems...")
+        self.subscription_checker = SubscriptionChecker(
+            self.application.bot, 
+            enable_subscription_check=Config.ENABLE_SUBSCRIPTION_CHECK
+        )
+        self.subscription_middleware = SubscriptionMiddleware(self.subscription_checker)
+        
+        # Устанавливаем глобальные экземпляры
+        set_subscription_checker(self.subscription_checker)
+        set_subscription_middleware(self.subscription_middleware)
         self.setup_handlers()
         
         logger.info("Обработчики настроены успешно")
@@ -406,7 +419,7 @@ class CS2TeammeetBot:
         
         self.application.add_handler(CallbackQueryHandler(
             moderation_handler_instance.handle_callback_query,
-            pattern="^(moderation_menu|mod_queue|mod_approved|mod_rejected|mod_stats|approve_|reject_|reject_reason_|next_profile).*$"
+            pattern="^(moderation_menu|mod_queue|mod_approved|mod_rejected|mod_stats|approve_|reject_|reject_reason_|next_profile|delete_profile_|confirm_delete_).*$"
         ))
         
         # Fallback handler для необработанных callbacks

@@ -6,6 +6,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from bot.utils.keyboards import Keyboards
 from bot.database.operations import DatabaseManager
+from bot.utils.subscription_middleware import subscription_required
 
 logger = logging.getLogger(__name__)
 

@@ -13,6 +13,8 @@ from bot.utils.callback_security import (
     sanitize_text_input, validate_callback_data
 )
 from bot.utils.enhanced_callback_security import validate_secure_callback, CallbackValidationResult
+from bot.utils.subscription_checker import get_subscription_checker
+from bot.utils.subscription_middleware import subscription_required
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,28 @@ class StartHandler:
             username=user.username,
             first_name=user.first_name
         )
+        
+        # Показываем информационное сообщение о каналах
+        subscription_checker = get_subscription_checker()
+        if subscription_checker:
+            try:
+                # Показываем дружелюбное информационное сообщение о каналах
+                message_text = subscription_checker.get_subscription_message()
+                keyboard = subscription_checker.get_subscription_keyboard()
+                
+                await update.message.reply_text(
+                    message_text,
+                    reply_markup=keyboard,
+                    parse_mode='HTML',
+                    disable_web_page_preview=True
+                )
+                
+                # Небольшая задержка перед показом главного меню
+                await asyncio.sleep(2)
+                
+            except Exception as e:
+                logger.error(f"Ошибка при показе информационного сообщения для пользователя {user.id}: {e}")
+                # В случае ошибки продолжаем работу без блокировки
         
         # Проверяем статус профиля пользователя
         has_any_profile = await self.db.has_profile(user.id)
@@ -253,15 +277,6 @@ class StartHandler:
                     await self.show_user_profile(query, target_user_id)
                 else:
                     await query.answer("❌ Ошибка: не указан ID пользователя")
-            elif action == "unblock_user":
-                target_user_id = parsed_data.get("target_user_id")
-                if target_user_id:
-                    # Получаем настройки приватности пользователя
-                    user_settings = await self.db.get_user_settings(user_id)
-                    privacy_settings = user_settings.privacy_settings if user_settings and user_settings.privacy_settings else {}
-                    await self.handle_unblock_user(query, f"unblock_{target_user_id}", privacy_settings)
-                else:
-                    await query.answer("❌ Ошибка: не указан ID пользователя")
             else:
                 logger.warning(f"Unknown secure callback action: {action}")
                 await query.answer("❌ Неизвестная команда")
@@ -296,6 +311,9 @@ class StartHandler:
         elif data.startswith("notify_"):
             await self.handle_notification_update(query, data)
         elif data.startswith("privacy_") or data.startswith("visibility_") or data.startswith("unblock_") or data.startswith("confirm_privacy_") or data.startswith("cancel_privacy_"):
+            await self.handle_privacy_option(query, data)
+        elif data.startswith("likes_") and data in ["likes_all", "likes_compatible_elo", "likes_common_maps", "likes_active_users"]:
+            # Обработка настроек приватности лайков
             await self.handle_privacy_option(query, data)
         elif data == "likes_history":
             await self.show_likes_history(query)
@@ -1231,9 +1249,6 @@ class StartHandler:
                     'show_matches_count': True,
                     'show_activity': True,
                     'show_faceit_url': True,
-                    'blocked_users': [],
-                    'block_reasons': {},
-                    'block_expiry': {}
                 }
             
             text = (
@@ -1256,11 +1271,13 @@ class StartHandler:
         try:
             await query.answer()
             user_id = query.from_user.id
+            logger.info(f"Обработка опции приватности для пользователя {user_id}, data: {data}")
             
             # Получаем текущие настройки
             user_settings = await self.db.get_user_settings(user_id)
             if user_settings and user_settings.privacy_settings:
                 privacy_settings = user_settings.privacy_settings
+                logger.info(f"Загружены существующие настройки приватности для {user_id}: {privacy_settings}")
             else:
                 privacy_settings = {
                     'profile_visibility': 'all',
@@ -1270,38 +1287,42 @@ class StartHandler:
                     'show_matches_count': True,
                     'show_activity': True,
                     'show_faceit_url': True,
-                    'blocked_users': [],
-                    'block_reasons': {},
-                    'block_expiry': {}
                 }
+                logger.info(f"Созданы настройки приватности по умолчанию для {user_id}")
             
             if data == "privacy_visibility":
+                logger.info(f"Показ меню видимости для пользователя {user_id}")
                 await self.show_privacy_visibility_menu(query, privacy_settings)
             elif data == "privacy_likes":
+                logger.info(f"Показ меню лайков для пользователя {user_id}")
                 await self.show_privacy_likes_menu(query, privacy_settings)
             elif data == "privacy_display":
+                logger.info(f"Показ меню отображения для пользователя {user_id}")
                 await self.show_privacy_display_menu(query, privacy_settings)
-            elif data == "privacy_blocking":
-                await self.show_privacy_blocking_menu(query, privacy_settings)
             elif data == "privacy_menu":
+                logger.info(f"Показ главного меню приватности для пользователя {user_id}")
                 await self.show_privacy_menu(query)
             elif data.startswith("visibility_"):
+                logger.info(f"Обработка изменения видимости для пользователя {user_id}: {data}")
                 await self.handle_visibility_change(query, data, privacy_settings)
             elif data.startswith("likes_"):
+                logger.info(f"Обработка изменения лайков для пользователя {user_id}: {data}")
                 await self.handle_likes_change(query, data, privacy_settings)
             elif data.startswith("toggle_"):
+                logger.info(f"Обработка переключения отображения для пользователя {user_id}: {data}")
                 await self.handle_display_toggle(query, data, privacy_settings)
-            elif data.startswith("unblock_"):
-                await self.handle_unblock_user(query, data, privacy_settings)
             elif data.startswith("confirm_privacy_"):
+                logger.info(f"Подтверждение изменения приватности для пользователя {user_id}: {data}")
                 await self.handle_privacy_confirmation(query, data, privacy_settings)
             elif data.startswith("cancel_privacy_"):
+                logger.info(f"Отмена изменения приватности для пользователя {user_id}: {data}")
                 await self.handle_privacy_cancellation(query, data)
             else:
+                logger.warning(f"Неизвестная опция приватности для пользователя {user_id}: {data}")
                 await self.show_privacy_menu(query)
                 
         except Exception as e:
-            logger.error(f"Ошибка обработки опции приватности {data}: {e}")
+            logger.error(f"Ошибка обработки опции приватности {data} для пользователя {user_id}: {e}", exc_info=True)
             await query.answer("❌ Ошибка обработки настройки")
 
     async def show_privacy_visibility_menu(self, query, privacy_settings):
@@ -1330,7 +1351,10 @@ class StartHandler:
 
     async def show_privacy_likes_menu(self, query, privacy_settings):
         """Показывает меню настройки лайков"""
+        user_id = query.from_user.id
         current_likes = privacy_settings.get('who_can_like', 'all')
+        
+        logger.info(f"Показ меню настроек лайков для пользователя {user_id}, текущая настройка: {current_likes}")
         
         descriptions = {
             'all': 'Любой пользователь может отправить вам лайк',
@@ -1347,6 +1371,7 @@ class StartHandler:
             "Выберите новую настройку:"
         )
         
+        logger.info(f"Отправка меню настроек лайков для пользователя {user_id}")
         await query.edit_message_text(
             text,
             reply_markup=Keyboards.privacy_likes_menu(current_likes),
@@ -1368,36 +1393,6 @@ class StartHandler:
             parse_mode='HTML'
         )
 
-    async def show_privacy_blocking_menu(self, query, privacy_settings):
-        """Показывает меню управления блокировкой"""
-        blocked_users = privacy_settings.get('blocked_users', [])
-        
-        if blocked_users:
-            # Получаем информацию о заблокированных пользователях
-            blocked_users_info = []
-            for user_id in blocked_users[:5]:  # Показываем только первые 5
-                # В реальной реализации здесь был бы запрос к БД для получения username
-                reason = privacy_settings.get('block_reasons', {}).get(str(user_id), 'Не указана')
-                blocked_users_info.append((user_id, f"User_{user_id}", reason))
-            
-            text = (
-                f"🚫 <b>Заблокированные пользователи</b>\n\n"
-                f"Всего заблокировано: {len(blocked_users)}\n\n"
-                "Нажмите на пользователя для разблокировки:"
-            )
-        else:
-            blocked_users_info = []
-            text = (
-                "🚫 <b>Заблокированные пользователи</b>\n\n"
-                "У вас нет заблокированных пользователей.\n\n"
-                "Вы можете заблокировать пользователя из его профиля в поиске."
-            )
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=Keyboards.privacy_blocking_menu(blocked_users_info),
-            parse_mode='HTML'
-        )
 
     async def handle_visibility_change(self, query, data, privacy_settings):
         """Обрабатывает изменение видимости профиля"""
@@ -1431,17 +1426,30 @@ class StartHandler:
 
     async def handle_likes_change(self, query, data, privacy_settings):
         """Обрабатывает изменение настроек лайков"""
+        user_id = query.from_user.id
+        logger.info(f"Обработка изменения настроек лайков для пользователя {user_id}, data: {data}")
+        
         new_likes = data.replace('likes_', '')
         old_likes = privacy_settings.get('who_can_like', 'all')
         
+        logger.info(f"Пользователь {user_id}: изменение лайков с '{old_likes}' на '{new_likes}'")
+        
+        # Валидация значения
+        valid_likes = ['all', 'compatible_elo', 'common_maps', 'active_users']
+        if new_likes not in valid_likes:
+            logger.error(f"Неверное значение настройки лайков: {new_likes}")
+            await query.answer("❌ Неверная настройка")
+            return
+        
         if new_likes == old_likes:
+            logger.info(f"Пользователь {user_id}: настройка лайков уже установлена на '{new_likes}'")
             await query.answer("✅ Эта настройка уже выбрана")
             return
         
         # Применяем изменение
         privacy_settings['who_can_like'] = new_likes
         
-        user_id = query.from_user.id
+        logger.info(f"Сохранение настроек лайков для пользователя {user_id}: {privacy_settings}")
         success = await self.db.update_user_settings(
             user_id,
             privacy_settings=privacy_settings
@@ -1454,8 +1462,10 @@ class StartHandler:
                 'common_maps': 'С общими картами',
                 'active_users': 'Только активные'
             }
+            logger.info(f"Настройки лайков успешно сохранены для пользователя {user_id}: {likes_names[new_likes]}")
             await query.answer(f"✅ Настройка лайков изменена на: {likes_names[new_likes]}")
         else:
+            logger.error(f"Ошибка сохранения настроек лайков для пользователя {user_id}")
             await query.answer("❌ Ошибка сохранения настроек")
         
         await self.show_privacy_menu(query)
@@ -1496,42 +1506,6 @@ class StartHandler:
         
         await self.show_privacy_display_menu(query, privacy_settings)
 
-    async def handle_unblock_user(self, query, data, privacy_settings):
-        """Обрабатывает разблокировку пользователя"""
-        # Безопасный парсинг user_id для разблокировки
-        user_id_result = safe_parse_user_id(data, "unblock_")
-        if not user_id_result.is_valid:
-            logger.error(f"Небезопасный callback_data в unblock_user: {data} - {user_id_result.error_message}")
-            await query.answer("❌ Ошибка валидации данных")
-            return
-        
-        user_id_to_unblock = user_id_result.parsed_data['user_id']
-        
-        blocked_users = privacy_settings.get('blocked_users', [])
-        if user_id_to_unblock in blocked_users:
-            blocked_users.remove(user_id_to_unblock)
-            privacy_settings['blocked_users'] = blocked_users
-            
-            # Удаляем связанные данные
-            block_reasons = privacy_settings.get('block_reasons', {})
-            block_expiry = privacy_settings.get('block_expiry', {})
-            block_reasons.pop(str(user_id_to_unblock), None)
-            block_expiry.pop(str(user_id_to_unblock), None)
-            
-            user_id = query.from_user.id
-            success = await self.db.update_user_settings(
-                user_id,
-                privacy_settings=privacy_settings
-            )
-            
-            if success:
-                await query.answer(f"✅ Пользователь {user_id_to_unblock} разблокирован")
-            else:
-                await query.answer("❌ Ошибка разблокировки")
-        else:
-            await query.answer("❌ Пользователь не найден в списке заблокированных")
-        
-        await self.show_privacy_blocking_menu(query, privacy_settings)
 
     async def handle_privacy_confirmation(self, query, data, privacy_settings):
         """Обрабатывает подтверждение изменений приватности"""
@@ -1854,3 +1828,77 @@ class StartHandler:
             
         except Exception as e:
             logger.debug(f"Ошибка фонового прогревания сети для пользователя {user_id}: {e}")
+    
+    async def handle_subscription_check(self, query):
+        """Обрабатывает проверку подписки пользователя"""
+        await query.answer()
+        user_id = query.from_user.id
+        
+        try:
+            subscription_checker = get_subscription_checker()
+            if not subscription_checker:
+                logger.error("SubscriptionChecker не инициализирован")
+                await query.answer("❌ Ошибка системы проверки подписки")
+                return
+            
+            # Проверяем подписку пользователя
+            subscription_status = await subscription_checker.check_user_subscription(user_id)
+            
+            # Обновляем статус в базе данных
+            await self.db.update_subscription_status(
+                user_id=user_id,
+                is_subscribed=subscription_status.is_subscribed,
+                missing_channels=subscription_status.missing_channels,
+                last_checked=subscription_status.checked_at
+            )
+            
+            if subscription_status.is_subscribed:
+                # Пользователь подписан на все каналы
+                success_message = (
+                    "✅ <b>Отлично!</b>\n\n"
+                    "Вы подписаны на все обязательные каналы!\n"
+                    "Теперь вы можете пользоваться всеми функциями бота.\n\n"
+                    "🎮 Добро пожаловать в CIS FINDER!"
+                )
+                
+                # Проверяем, нужно ли обновлять сообщение
+                current_text = query.message.text if query.message else ""
+                if current_text != success_message:
+                    await query.edit_message_text(
+                        success_message,
+                        reply_markup=Keyboards.back_button("back_to_main"),
+                        parse_mode='HTML'
+                    )
+                else:
+                    # Если сообщение не изменилось, просто отвечаем на callback
+                    await query.answer("✅ Вы уже подписаны на все каналы!")
+                
+                logger.info(f"Пользователь {user_id} успешно прошел проверку подписки")
+            else:
+                # Пользователь не подписан на некоторые каналы
+                message_text = subscription_checker.get_subscription_message(
+                    subscription_status.missing_channels
+                )
+                keyboard = subscription_checker.get_subscription_keyboard(
+                    subscription_status.missing_channels
+                )
+                
+                # Проверяем, нужно ли обновлять сообщение
+                current_text = query.message.text if query.message else ""
+                if current_text != message_text:
+                    await query.edit_message_text(
+                        message_text,
+                        reply_markup=keyboard,
+                        parse_mode='HTML',
+                        disable_web_page_preview=True
+                    )
+                else:
+                    # Если сообщение не изменилось, просто отвечаем на callback
+                    await query.answer("❌ Пожалуйста, подпишитесь на все каналы")
+                
+                logger.info(f"Пользователь {user_id} не прошел проверку подписки: {subscription_status.missing_channels}")
+                
+        except Exception as e:
+            logger.error(f"Ошибка при проверке подписки для пользователя {user_id}: {e}")
+            await query.answer("❌ Произошла ошибка при проверке подписки")
+            await self.show_main_menu(query)

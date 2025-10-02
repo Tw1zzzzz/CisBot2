@@ -40,6 +40,9 @@ class Config:
     MAX_DAILY_LIKES = int(os.getenv('MAX_DAILY_LIKES', '50'))
     COOLDOWN_BETWEEN_LIKES = int(os.getenv('COOLDOWN_BETWEEN_LIKES', '1'))
     
+    # Subscription check settings
+    ENABLE_SUBSCRIPTION_CHECK = os.getenv('ENABLE_SUBSCRIPTION_CHECK', 'false').lower() == 'true'
+    
     # Faceit Analyser API settings
     FACEIT_ANALYSER_API_KEY = os.getenv('FACEIT_ANALYSER_API_KEY')
     FACEIT_ANALYSER_BASE_URL = os.getenv('FACEIT_ANALYSER_BASE_URL', 'https://faceitanalyser.com/api/')

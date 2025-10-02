@@ -459,7 +459,6 @@ class Keyboards:
         # Получаем текущие настройки с значениями по умолчанию
         visibility = privacy_settings.get('profile_visibility', 'all')
         who_can_like = privacy_settings.get('who_can_like', 'all')
-        blocked_count = len(privacy_settings.get('blocked_users', []))
         
         # Подсчитываем показываемые данные
         display_settings = [
@@ -489,7 +488,6 @@ class Keyboards:
             [InlineKeyboardButton(f"👁️ Видимость: {visibility_text}", callback_data="privacy_visibility")],
             [InlineKeyboardButton(f"💌 Лайки: {likes_text}", callback_data="privacy_likes")],
             [InlineKeyboardButton(f"📊 Данные: {shown_count}/5 показано", callback_data="privacy_display")],
-            [InlineKeyboardButton(f"🚫 Блокировка: {blocked_count} пользователей", callback_data="privacy_blocking")],
             [InlineKeyboardButton("🔙 В настройки", callback_data="settings_menu")]
         ]
         return InlineKeyboardMarkup(keyboard)
@@ -515,6 +513,8 @@ class Keyboards:
     @staticmethod
     def privacy_likes_menu(current_setting='all'):
         """Меню настройки лайков"""
+        logger.info(f"Создание клавиатуры настроек лайков, текущая настройка: {current_setting}")
+        
         options = [
             ('all', '🌍 Все пользователи'),
             ('compatible_elo', '🎯 Совместимые по ELO (±2 уровня)'),
@@ -526,9 +526,12 @@ class Keyboards:
         for value, text in options:
             if value == current_setting:
                 text = f"✅ {text}"
-            keyboard.append([InlineKeyboardButton(text, callback_data=f"likes_{value}")])
+            callback_data = f"likes_{value}"
+            logger.info(f"Создание кнопки: {text} -> {callback_data}")
+            keyboard.append([InlineKeyboardButton(text, callback_data=callback_data)])
         
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="privacy_menu")])
+        logger.info(f"Клавиатура настроек лайков создана с {len(keyboard)} кнопками")
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod  
@@ -557,37 +560,6 @@ class Keyboards:
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="privacy_menu")])
         return InlineKeyboardMarkup(keyboard)
 
-    @staticmethod
-    def privacy_blocking_menu(blocked_users_info):
-        """Меню управления блокировкой"""
-        keyboard = []
-        
-        if blocked_users_info:
-            # Показываем до 5 заблокированных пользователей
-            for i, (user_id, username, reason) in enumerate(blocked_users_info[:5]):
-                display_name = username or f"ID: {user_id}"
-                reason_text = f" ({reason})" if reason else ""
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"🚫 {display_name}{reason_text}",
-                        callback_data=f"unblock_{user_id}"
-                    )
-                ])
-            
-            if len(blocked_users_info) > 5:
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"📋 Показать все ({len(blocked_users_info)})",
-                        callback_data="blocking_show_all"
-                    )
-                ])
-        else:
-            keyboard.append([
-                InlineKeyboardButton("ℹ️ Нет заблокированных пользователей", callback_data="blocking_info")
-            ])
-        
-        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="privacy_menu")])
-        return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
     def privacy_confirmation_menu(setting_type, old_value, new_value):
@@ -635,6 +607,47 @@ class Keyboards:
             ],
             [InlineKeyboardButton("⏭️ Следующая анкета", callback_data="next_profile")],
             [InlineKeyboardButton("🔙 К модерации", callback_data="moderation_menu")]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    @staticmethod
+    def moderation_profile_list_actions(profiles, can_delete=False):
+        """Клавиатура для списка профилей с действиями"""
+        keyboard = []
+        
+        for profile_data in profiles:
+            nickname = profile_data['game_nickname']
+            user_id = profile_data['user_id']
+            
+            # Основная кнопка профиля
+            profile_button = InlineKeyboardButton(
+                f"👤 {nickname} (ID: {user_id})", 
+                callback_data=f"view_profile_{user_id}"
+            )
+            
+            if can_delete:
+                # Кнопка удаления рядом с профилем
+                delete_button = InlineKeyboardButton(
+                    "🗑️", 
+                    callback_data=f"delete_profile_{user_id}"
+                )
+                keyboard.append([profile_button, delete_button])
+            else:
+                keyboard.append([profile_button])
+        
+        # Кнопка возврата
+        keyboard.append([InlineKeyboardButton("🔙 К модерации", callback_data="moderation_menu")])
+        
+        return InlineKeyboardMarkup(keyboard)
+
+    @staticmethod
+    def moderation_delete_confirmation(user_id):
+        """Клавиатура подтверждения удаления"""
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Да, удалить", callback_data=f"confirm_delete_{user_id}"),
+                InlineKeyboardButton("❌ Отмена", callback_data="moderation_menu")
+            ]
         ]
         return InlineKeyboardMarkup(keyboard)
 
@@ -803,39 +816,6 @@ class Keyboards:
         ]
         return InlineKeyboardMarkup(keyboard)
     
-    @staticmethod
-    def secure_privacy_blocking_menu(user_id: int, blocked_users_info):
-        """Безопасное меню управления блокировкой"""
-        keyboard = []
-        
-        if blocked_users_info:
-            # Показываем до 5 заблокированных пользователей
-            for i, (blocked_user_id, username, reason) in enumerate(blocked_users_info[:5]):
-                display_name = username or f"ID: {blocked_user_id}"
-                reason_text = f" ({reason})" if reason else ""
-                keyboard.append([
-                    Keyboards._create_secure_button(
-                        f"🚫 {display_name}{reason_text}",
-                        "unblock_user",
-                        user_id,
-                        {"target_user_id": blocked_user_id}
-                    )
-                ])
-            
-            if len(blocked_users_info) > 5:
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"📋 Показать все ({len(blocked_users_info)})",
-                        callback_data="blocking_show_all"
-                    )
-                ])
-        else:
-            keyboard.append([
-                InlineKeyboardButton("ℹ️ Нет заблокированных пользователей", callback_data="blocking_info")
-            ])
-        
-        keyboard.append([Keyboards._create_secure_button("🔙 Назад", "privacy_menu", user_id)])
-        return InlineKeyboardMarkup(keyboard)
     
     @staticmethod
     def secure_like_response_buttons(user_id: int, liker_id: int):
@@ -847,5 +827,25 @@ class Keyboards:
             ],
             [Keyboards._create_secure_button("👁️ Посмотреть профиль", "view_profile", user_id, {"target_user_id": liker_id})],
             [Keyboards._create_secure_button("🔙 К истории лайков", "likes_history", user_id)]
+        ]
+        return InlineKeyboardMarkup(keyboard)
+
+    @staticmethod
+    def secure_moderation_delete_confirmation(user_id: int, target_user_id: int):
+        """Безопасная клавиатура подтверждения удаления"""
+        keyboard = [
+            [
+                Keyboards._create_secure_button(
+                    "✅ Да, удалить", 
+                    "confirm_delete_profile", 
+                    user_id, 
+                    {"target_user_id": target_user_id}
+                ),
+                Keyboards._create_secure_button(
+                    "❌ Отмена", 
+                    "moderation_menu", 
+                    user_id
+                )
+            ]
         ]
         return InlineKeyboardMarkup(keyboard) 
